@@ -1,0 +1,12 @@
+# extensions/event-signin-sheet/shopify.extension.toml
+api_version = "2026-10"
+
+[[extensions]]
+name = "Event Sign-in Sheet"
+handle = "event-signin-sheet"
+type = "ui_extension"
+uid = "event-signin-sheet"
+
+  [[extensions.targeting]]
+  target = "admin.product-details.print-action.render"
+  module = "./src/PrintActionExtension.jsx"

@@ -1,0 +1,16 @@
+# extensions/event-attendees/shopify.extension.toml
+api_version = "2026-10"
+
+[[extensions]]
+name = "Event Attendees"
+handle = "event-attendees"
+type = "ui_extension"
+uid = "event-attendees"
+
+  # Lets the panel read the saved list directly from Shopify (no extra server code).
+  [extensions.capabilities]
+  api_access = true
+
+  [[extensions.targeting]]
+  target = "admin.product-details.block.render"
+  module = "./src/BlockExtension.jsx"
