@@ -29,3 +29,5 @@ scopes = "read_orders,read_products,read_metaobjects,write_metaobjects"
 
 [auth]
 redirect_urls = [ "https://magnificent-alignment-production-373e.up.railway.app/api/auth" ]
+
+# redeploy trigger
