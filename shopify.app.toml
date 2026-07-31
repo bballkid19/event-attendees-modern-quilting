@@ -2,7 +2,7 @@
 
 client_id = "9c34d7e26ba1f5ce83a7dc4f409f5388"
 name = "event-attendees"
-application_url = "https://example.com"
+application_url = "https://magnificent-alignment-production-373e.up.railway.app"
 embedded = true
 
 [build]
@@ -28,4 +28,4 @@ api_version = "2026-10"
 scopes = "read_orders,read_products,read_metaobjects,write_metaobjects"
 
 [auth]
-redirect_urls = [ "https://example.com/api/auth" ]
+redirect_urls = [ "https://magnificent-alignment-production-373e.up.railway.app/api/auth" ]
