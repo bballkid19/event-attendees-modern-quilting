@@ -76,7 +76,7 @@ function Attendees() {
   if (state.loading) {
     return (
       <s-admin-block heading="Event Attendees">
-        <s-text>Loading attendees…</s-text>
+        <s-text tone="subdued">Loading attendees…</s-text>
       </s-admin-block>
     );
   }
@@ -95,22 +95,38 @@ function Attendees() {
     );
   }
 
+  const totalDates = state.groups.length;
+  const totalAttendees = state.groups.reduce((n, g) => n + g.count, 0);
+
   return (
     <s-admin-block heading="Event Attendees">
-      <s-stack direction="block" gap="base">
-        {state.groups.map((g) => (
+      <s-stack direction="block" gap="loose">
+        <s-stack direction="inline" gap="base" inlineAlignment="space-between">
+          <s-text tone="subdued">
+            {totalDates} {totalDates === 1 ? 'date' : 'dates'} · {totalAttendees} total {totalAttendees === 1 ? 'attendee' : 'attendees'}
+          </s-text>
+        </s-stack>
+
+        <s-divider />
+
+        {state.groups.map((g, gi) => (
           <s-stack direction="block" gap="tight" key={g.date}>
-            <s-stack direction="inline" gap="base" inlineAlignment="space-between">
+            <s-stack direction="inline" gap="base" inlineAlignment="space-between" blockAlignment="center">
               <s-text fontWeight="bold">{g.date}</s-text>
-              <s-badge tone="info">{g.count} attending</s-badge>
+              <s-badge tone="success">{g.count} attending</s-badge>
             </s-stack>
-            {g.people.map((p, i) => (
-              <s-text key={i}>
-                {p.attendee_name}{p.attendee_email ? ` · ${p.attendee_email}` : ''}
-                {parseInt(p.quantity, 10) > 1 ? ` · ×${p.quantity}` : ''}
-              </s-text>
-            ))}
-            <s-divider />
+
+            <s-stack direction="block" gap="extra-tight">
+              {g.people.map((p, i) => (
+                <s-text key={i}>
+                  {i + 1}. {p.attendee_name}
+                  {p.attendee_email ? ` · ${p.attendee_email}` : ''}
+                  {parseInt(p.quantity, 10) > 1 ? ` · ×${p.quantity}` : ''}
+                </s-text>
+              ))}
+            </s-stack>
+
+            {gi < state.groups.length - 1 ? <s-divider /> : null}
           </s-stack>
         ))}
       </s-stack>
