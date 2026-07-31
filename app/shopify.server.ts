@@ -6,7 +6,7 @@ import {
 } from "@shopify/shopify-app-react-router/server";
 import { PrismaSessionStorage } from "@shopify/shopify-app-session-storage-prisma";
 import prisma from "./db.server";
-console.log("DEBUG config:", {
+console.log("DEBUG server time:", new Date().toISOString());
   apiKeyLen: (process.env.SHOPIFY_API_KEY || "").length,
   apiSecretLen: (process.env.SHOPIFY_API_SECRET || "").length,
   scopes: process.env.SCOPES,
