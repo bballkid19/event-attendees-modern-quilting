@@ -2,9 +2,9 @@
 //
 // Runs on your app's backend every time an order is placed.
 // For each line item that belongs to an event product, it saves ONE
-// "event_registration" metaobject entry. Because we save at order time,
-// we never read old orders — the 60-day order limit never applies and
-// read_all_orders is NOT needed.
+// "event_registration" metaobject entry per student registered on that
+// line item. Because we save at order time, we never read old orders —
+// the 60-day order limit never applies and read_all_orders is NOT needed.
 
 import type { ActionFunctionArgs } from "react-router";
 import { authenticate } from "../shopify.server";
@@ -90,22 +90,52 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const gid = li.product_id ? productGid(li.product_id) : "";
     if (!eventProductGids.has(gid)) continue;
 
-    // Attendee captured on the product form (line item properties) wins;
-    // otherwise fall back to the buyer.
     const props: any[] = li.properties || [];
-    const nameProp = props.find((p) => /name/i.test(p.name) && p.value);
-    const emailProp = props.find((p) => /e-?mail/i.test(p.name) && p.value);
 
-    await saveRegistration(admin, {
-      event_product: gid,
-      // Your calendar stores each date as the variant — so the variant title IS the date.
-      event_date: li.variant_title || li.title || "Event",
-      attendee_name: (nameProp?.value || buyerName || "Unknown").toString(),
-      attendee_email: (emailProp?.value || buyerEmail || "").toString(),
-      quantity: String(li.quantity || 1),
-      order_name: order.name || "",
-      ordered_at: order.created_at || new Date().toISOString(),
+    // Your product page's registration form sends "Student 1 Name",
+    // "Student 1 Email", "Student 2 Name", etc. — one set per student,
+    // added automatically as quantity increases. Find every student
+    // index present on this line item.
+    const studentIndexes = new Set<number>();
+    props.forEach((p) => {
+      const m = String(p.name || "").match(/^Student (\d+) Name$/i);
+      if (m) studentIndexes.add(parseInt(m[1], 10));
     });
+
+    if (studentIndexes.size > 0) {
+      // Multi-student registration form — save ONE row per student,
+      // so a quantity-3 order creates 3 separate attendee entries.
+      for (const idx of Array.from(studentIndexes).sort((a, b) => a - b)) {
+        const nameProp = props.find((p) => p.name === `Student ${idx} Name`);
+        const emailProp = props.find((p) => p.name === `Student ${idx} Email`);
+        const dateProp = props.find((p) => p.name === "Class Date");
+
+        await saveRegistration(admin, {
+          event_product: gid,
+          // "Class Date" is the hidden field your theme sets to the
+          // selected variant's date — more reliable than the variant
+          // title alone since it's exactly what the form submitted.
+          event_date: (dateProp?.value || li.variant_title || li.title || "Event").toString(),
+          attendee_name: (nameProp?.value || "Unknown").toString(),
+          attendee_email: (emailProp?.value || "").toString(),
+          quantity: "1",
+          order_name: order.name || "",
+          ordered_at: order.created_at || new Date().toISOString(),
+        });
+      }
+    } else {
+      // Fallback for products without the per-student form (or if it
+      // wasn't filled in) — save one row using the buyer as attendee.
+      await saveRegistration(admin, {
+        event_product: gid,
+        event_date: li.variant_title || li.title || "Event",
+        attendee_name: buyerName || "Unknown",
+        attendee_email: buyerEmail || "",
+        quantity: String(li.quantity || 1),
+        order_name: order.name || "",
+        ordered_at: order.created_at || new Date().toISOString(),
+      });
+    }
   }
 
   return new Response();
