@@ -4,20 +4,27 @@
 // you paste or upload a CSV of attendees and create one saved
 // "event_registration" per row — the same kind of record the live webhook
 // creates for real orders. Useful for backfilling attendees from before the
-// app went live, or adding walk-in / manually-taken registrations.
+// app went live, from a RainPOS export, or adding walk-in registrations.
 //
 // Product selection is a type-to-search box (like searching products
 // anywhere else in Shopify admin) rather than a dropdown, since a full
 // product list is unusable on stores with thousands of products.
 //
-// CSV columns (header row required, case-insensitive):
-//   Product   — optional. Exact product title. If left blank, the row uses
-//               whichever event you searched for and selected above.
-//   Date      — required. The event date/session, e.g. "Aug 15 2026 10:00 AM".
-//   Name      — required. Attendee's name.
-//   Email     — optional.
-//   Quantity  — optional, defaults to 1.
-//   Order     — optional label (e.g. an order number), defaults to "Manual import".
+// Two CSV shapes are understood automatically:
+//
+// 1) Simple format — header row (case-insensitive):
+//      Product, Date, Name, Email, Quantity, Order
+//    Product and Order are optional per row. Date falls back to the
+//    "Default date" field below if a row doesn't have one.
+//
+// 2) RainPOS export — header row exactly:
+//      Transaction ID, Last Name, First Name, Attendees, Email, Phone,
+//      Cell, Seats, Price, Transaction Notes, Materials
+//    Detected automatically. "Attendees" (e.g. "Nancy Miller; Sue Miller; ")
+//    is split on ";" into one registration per named attendee. If it's
+//    blank, First + Last Name is used instead. Every row uses the "Default
+//    event" and "Default date" fields below, since RainPOS exports don't
+//    include a product or date column — the whole file is one class session.
 
 import { useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
@@ -71,10 +78,27 @@ function parseCsv(text: string): Record<string, string>[] {
   });
 }
 
+// A single CSV row can represent more than one attendee (RainPOS's
+// "Attendees" column lists everyone on a multi-seat booking, separated by
+// semicolons). This returns the list of names to create registrations for.
+function resolveNames(row: Record<string, string>): string[] {
+  if (row.attendees) {
+    const names = row.attendees
+      .split(";")
+      .map((n) => n.trim())
+      .filter(Boolean);
+    if (names.length) return names;
+  }
+  if (row.name) return [row.name];
+  const combined = [row["first name"], row["last name"]].filter(Boolean).join(" ").trim();
+  if (combined) return [combined];
+  return [];
+}
+
 // ---------- Shared helpers ----------
 
 // Search products by title. No tag/metafield filtering — works for any
-// store regardless of how many products it has or how events are tagged.
+// store regardless of how many products it has.
 async function searchProducts(admin: any, term: string): Promise<EventProduct[]> {
   const cleanTerm = term.trim();
   if (!cleanTerm) return [];
@@ -134,7 +158,7 @@ async function saveRegistration(admin: any, fields: Record<string, string>) {
   return errs && errs.length ? errs[0].message : null;
 }
 
-// ---------- Loader: nothing to preload — search happens via fetcher ----------
+// ---------- Loader ----------
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   await authenticate.admin(request);
   return null;
@@ -156,6 +180,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
   // --- CSV import ---
   const csvText = String(formData.get("csvText") || "");
   const defaultProductId = String(formData.get("defaultProductId") || "");
+  const defaultDate = String(formData.get("defaultDate") || "");
 
   const rows = parseCsv(csvText);
   let created = 0;
@@ -164,10 +189,10 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
-    const name = r.name || "";
-    const productTitle = r.product || "";
 
+    // Resolve the product for this row.
     let productId: string | null = defaultProductId || null;
+    const productTitle = r.product || "";
     if (productTitle) {
       const key = productTitle.toLowerCase();
       if (!titleCache.has(key)) {
@@ -179,33 +204,46 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     if (!productId) {
       skipped.push({
         row: i + 2,
-        reason: productTitle ? `Couldn't find product "${productTitle}"` : "No product selected",
+        reason: productTitle ? `Couldn't find product "${productTitle}"` : "No event selected",
       });
       continue;
     }
-    if (!name) {
-      skipped.push({ row: i + 2, reason: "Missing name" });
-      continue;
-    }
-    if (!r.date) {
+
+    const date = r.date || defaultDate;
+    if (!date) {
       skipped.push({ row: i + 2, reason: "Missing date" });
       continue;
     }
 
-    const err = await saveRegistration(admin, {
-      event_product: productId,
-      event_date: r.date,
-      attendee_name: name,
-      attendee_email: r.email || "",
-      quantity: r.quantity || "1",
-      order_name: r.order || "Manual import",
-      ordered_at: new Date().toISOString(),
-    });
+    const names = resolveNames(r);
+    if (!names.length) {
+      skipped.push({ row: i + 2, reason: "Missing name" });
+      continue;
+    }
 
-    if (err) {
-      skipped.push({ row: i + 2, reason: err });
-    } else {
-      created += 1;
+    const email = r.email || "";
+    const order = r["transaction id"] || r.order || "Manual import";
+    // If the row lists multiple named attendees (RainPOS's "Attendees"
+    // column), each is its own registration of quantity 1. Otherwise use
+    // the row's own quantity/seats value for a single combined name.
+    const perNameQuantity = names.length > 1 ? "1" : r.quantity || r.seats || "1";
+
+    for (const name of names) {
+      const err = await saveRegistration(admin, {
+        event_product: productId,
+        event_date: date,
+        attendee_name: name,
+        attendee_email: email,
+        quantity: perNameQuantity,
+        order_name: order,
+        ordered_at: new Date().toISOString(),
+      });
+
+      if (err) {
+        skipped.push({ row: i + 2, reason: err });
+      } else {
+        created += 1;
+      }
     }
   }
 
@@ -221,6 +259,7 @@ export default function ImportAttendees() {
   const [csvText, setCsvText] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedProduct, setSelectedProduct] = useState<EventProduct | null>(null);
+  const [defaultDate, setDefaultDate] = useState("");
 
   const isSubmitting = navigation.state === "submitting";
   const searchResults: EventProduct[] =
@@ -246,9 +285,9 @@ export default function ImportAttendees() {
 
   return (
     <s-page heading="Import Attendees">
-      <s-section heading="1. Find the default event">
+      <s-section heading="1. Find the event">
         <s-paragraph>
-          Search by product name. This is used for any CSV row that doesn't include its own "Product" column.
+          Search by product name. Used for every row unless a row's CSV has its own "Product" column.
         </s-paragraph>
         <input
           type="text"
@@ -297,10 +336,26 @@ export default function ImportAttendees() {
         ) : null}
       </s-section>
 
-      <s-section heading="2. Upload or paste your CSV">
+      <s-section heading="2. Set the date">
         <s-paragraph>
-          Columns (header row required): <strong>Product, Date, Name, Email, Quantity, Order</strong>.
-          Product and Order are optional. Name and Date are required per row.
+          Used for every row unless a row's CSV has its own "Date" column. Match the format your calendar
+          uses for this event, e.g. <strong>Aug 15 2026 10:00 AM</strong>.
+        </s-paragraph>
+        <input
+          type="text"
+          value={defaultDate}
+          onChange={(e) => setDefaultDate(e.target.value)}
+          placeholder="Aug 15 2026 10:00 AM"
+          style={{ padding: "8px", borderRadius: "6px", width: "100%", maxWidth: "420px" }}
+        />
+      </s-section>
+
+      <s-section heading="3. Upload or paste your CSV">
+        <s-paragraph>
+          Two formats work automatically: a simple sheet with <strong>Product, Date, Name, Email,
+          Quantity, Order</strong> columns, or a direct RainPOS class export (Transaction ID, Last Name,
+          First Name, Attendees, Email, Phone, Cell, Seats, Price…). For a RainPOS export, "Attendees"
+          rows like "Jane Doe; Sue Doe;" become two separate registrations.
         </s-paragraph>
         <input type="file" accept=".csv,text/csv" onChange={handleFile} />
         <div style={{ marginTop: "12px" }}>
@@ -319,6 +374,7 @@ export default function ImportAttendees() {
           <input type="hidden" name="intent" value="import" />
           <input type="hidden" name="csvText" value={csvText} />
           <input type="hidden" name="defaultProductId" value={selectedProduct?.id || ""} />
+          <input type="hidden" name="defaultDate" value={defaultDate} />
           <button
             type="submit"
             disabled={isSubmitting || !csvText.trim()}
