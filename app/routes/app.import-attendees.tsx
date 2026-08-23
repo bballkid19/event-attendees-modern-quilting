@@ -72,13 +72,21 @@ async function getEventProducts(admin: any): Promise<EventProduct[]> {
   const products: EventProduct[] = [];
   let after: string | null = null;
   let pages = 0;
+  // Cap how many products we scan — adjust higher if the shop has more
+  // than ~2,000 products and event products are further down the list.
+  const MAX_PAGES = 20;
+
   do {
     const res = await admin.graphql(
       `#graphql
       query($after: String) {
-        products(first: 100, after: $after, query: "metafield_key:custom.event_dates") {
+        products(first: 100, after: $after) {
           pageInfo { hasNextPage endCursor }
-          nodes { id title }
+          nodes {
+            id
+            title
+            metafield(namespace: "custom", key: "event_dates") { id }
+          }
         }
       }`,
       { variables: { after } },
@@ -86,10 +94,13 @@ async function getEventProducts(admin: any): Promise<EventProduct[]> {
     const body = await res.json();
     const conn = body?.data?.products;
     if (!conn) break;
-    conn.nodes.forEach((n: any) => products.push({ id: n.id, title: n.title }));
+    conn.nodes.forEach((n: any) => {
+      if (n.metafield) products.push({ id: n.id, title: n.title });
+    });
     after = conn.pageInfo.hasNextPage ? conn.pageInfo.endCursor : null;
     pages += 1;
-  } while (after && pages < 10);
+  } while (after && pages < MAX_PAGES);
+
   return products;
 }
 
