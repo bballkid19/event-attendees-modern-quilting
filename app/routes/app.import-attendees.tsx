@@ -8,23 +8,25 @@
 //
 // Product selection is a type-to-search box (like searching products
 // anywhere else in Shopify admin) rather than a dropdown, since a full
-// product list is unusable on stores with thousands of products.
+// product list is unusable on stores with thousands of products. Once an
+// event is selected, its actual variant titles (the dates your calendar
+// already uses) populate a dropdown — no free-typed date to mistype.
 //
 // Two CSV shapes are understood automatically:
 //
-// 1) Simple format — header row (case-insensitive):
-//      Product, Date, Name, Email, Quantity, Order
-//    Product and Order are optional per row. Date falls back to the
-//    "Default date" field below if a row doesn't have one.
+// Simple format — header row (case-insensitive):
+//   Product, Date, Name, Email, Quantity, Order
+//   Product and Order are optional per row. Date falls back to the
+//   dropdown selection below if a row doesn't have one.
 //
-// 2) RainPOS export — header row exactly:
-//      Transaction ID, Last Name, First Name, Attendees, Email, Phone,
-//      Cell, Seats, Price, Transaction Notes, Materials
-//    Detected automatically. "Attendees" (e.g. "Nancy Miller; Sue Miller; ")
-//    is split on ";" into one registration per named attendee. If it's
-//    blank, First + Last Name is used instead. Every row uses the "Default
-//    event" and "Default date" fields below, since RainPOS exports don't
-//    include a product or date column — the whole file is one class session.
+// RainPOS export — header row exactly:
+//   Transaction ID, Last Name, First Name, Attendees, Email, Phone,
+//   Cell, Seats, Price, Transaction Notes, Materials
+//   Detected automatically. "Attendees" (e.g. "Nancy Miller; Sue Miller; ")
+//   is split on ";" into one registration per named attendee. If it's
+//   blank, First + Last Name is used instead. Every row uses the selected
+//   event and date below, since RainPOS exports don't include a product
+//   or date column — the whole file is one class session.
 
 import { useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
@@ -32,6 +34,7 @@ import { useActionData, useFetcher, useNavigation, Form } from "react-router";
 import { authenticate } from "../shopify.server";
 
 type EventProduct = { id: string; title: string };
+type ProductVariant = { id: string; title: string };
 
 // ---------- CSV parsing (no external library — handles quoted commas) ----------
 function parseCsvLine(line: string): string[] {
@@ -117,6 +120,25 @@ async function searchProducts(admin: any, term: string): Promise<EventProduct[]>
   return nodes.map((n: any) => ({ id: n.id, title: n.title }));
 }
 
+// Fetch a product's variants — each variant title is one of its event
+// dates, matching exactly what the calendar section already displays.
+async function getVariants(admin: any, productId: string): Promise<ProductVariant[]> {
+  const res = await admin.graphql(
+    `#graphql
+    query($id: ID!) {
+      product(id: $id) {
+        variants(first: 100) {
+          nodes { id title }
+        }
+      }
+    }`,
+    { variables: { id: productId } },
+  );
+  const body = await res.json();
+  const nodes = body?.data?.product?.variants?.nodes || [];
+  return nodes.map((n: any) => ({ id: n.id, title: n.title }));
+}
+
 // Look up a single product's GID by exact title match — used when a CSV
 // row specifies its own "Product" column.
 async function findProductByTitle(admin: any, title: string): Promise<string | null> {
@@ -164,7 +186,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   return null;
 };
 
-// ---------- Combined action: handles both product search and CSV import ----------
+// ---------- Combined action: product search, variant lookup, and CSV import ----------
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { admin } = await authenticate.admin(request);
   const formData = await request.formData();
@@ -175,6 +197,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     const term = String(formData.get("term") || "");
     const products = await searchProducts(admin, term);
     return { intent: "search", products };
+  }
+
+  // --- Fetch a product's dates (variants), called after picking an event ---
+  if (intent === "variants") {
+    const productId = String(formData.get("productId") || "");
+    const variants = productId ? await getVariants(admin, productId) : [];
+    return { intent: "variants", variants };
   }
 
   // --- CSV import ---
@@ -255,24 +284,39 @@ export default function ImportAttendees() {
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const searchFetcher = useFetcher<typeof action>();
+  const variantFetcher = useFetcher<typeof action>();
 
   const [csvText, setCsvText] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedProduct, setSelectedProduct] = useState<EventProduct | null>(null);
-  const [defaultDate, setDefaultDate] = useState("");
+  const [selectedDate, setSelectedDate] = useState("");
 
   const isSubmitting = navigation.state === "submitting";
   const searchResults: EventProduct[] =
     searchFetcher.data && searchFetcher.data.intent === "search" ? searchFetcher.data.products : [];
+  const variants: ProductVariant[] =
+    variantFetcher.data && variantFetcher.data.intent === "variants" ? variantFetcher.data.variants : [];
+  const loadingVariants = variantFetcher.state !== "idle";
 
   function runSearch(term: string) {
     setSearchTerm(term);
     setSelectedProduct(null);
+    setSelectedDate("");
     if (term.trim().length < 2) return;
     const fd = new FormData();
     fd.set("intent", "search");
     fd.set("term", term);
     searchFetcher.submit(fd, { method: "post" });
+  }
+
+  function pickProduct(p: EventProduct) {
+    setSelectedProduct(p);
+    setSearchTerm(p.title);
+    setSelectedDate("");
+    const fd = new FormData();
+    fd.set("intent", "variants");
+    fd.set("productId", p.id);
+    variantFetcher.submit(fd, { method: "post" });
   }
 
   function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -300,7 +344,14 @@ export default function ImportAttendees() {
         {selectedProduct ? (
           <p style={{ marginTop: "10px" }}>
             Selected: <strong>{selectedProduct.title}</strong>{" "}
-            <button type="button" onClick={() => { setSelectedProduct(null); setSearchTerm(""); }}>
+            <button
+              type="button"
+              onClick={() => {
+                setSelectedProduct(null);
+                setSearchTerm("");
+                setSelectedDate("");
+              }}
+            >
               Change
             </button>
           </p>
@@ -310,10 +361,7 @@ export default function ImportAttendees() {
               <li key={p.id}>
                 <button
                   type="button"
-                  onClick={() => {
-                    setSelectedProduct(p);
-                    setSearchTerm(p.title);
-                  }}
+                  onClick={() => pickProduct(p)}
                   style={{
                     display: "block",
                     width: "100%",
@@ -336,19 +384,34 @@ export default function ImportAttendees() {
         ) : null}
       </s-section>
 
-      <s-section heading="2. Set the date">
-        <s-paragraph>
-          Used for every row unless a row's CSV has its own "Date" column. Match the format your calendar
-          uses for this event, e.g. <strong>Aug 15 2026 10:00 AM</strong>.
-        </s-paragraph>
-        <input
-          type="text"
-          value={defaultDate}
-          onChange={(e) => setDefaultDate(e.target.value)}
-          placeholder="Aug 15 2026 10:00 AM"
-          style={{ padding: "8px", borderRadius: "6px", width: "100%", maxWidth: "420px" }}
-        />
-      </s-section>
+      {selectedProduct ? (
+        <s-section heading="2. Pick the date">
+          <s-paragraph>
+            Used for every row unless a row's CSV has its own "Date" column. These are the actual dates
+            set up on this event.
+          </s-paragraph>
+          {loadingVariants ? (
+            <p>Loading dates…</p>
+          ) : variants.length ? (
+            <select
+              value={selectedDate}
+              onChange={(e) => setSelectedDate(e.target.value)}
+              style={{ padding: "8px", borderRadius: "6px", width: "100%", maxWidth: "420px" }}
+            >
+              <option value="">— Select a date —</option>
+              {variants.map((v) => (
+                <option key={v.id} value={v.title}>
+                  {v.title}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <p style={{ color: "#666" }}>
+              This event has no dates set up as variants yet — add one on the product first.
+            </p>
+          )}
+        </s-section>
+      ) : null}
 
       <s-section heading="3. Upload or paste your CSV">
         <s-paragraph>
@@ -374,7 +437,7 @@ export default function ImportAttendees() {
           <input type="hidden" name="intent" value="import" />
           <input type="hidden" name="csvText" value={csvText} />
           <input type="hidden" name="defaultProductId" value={selectedProduct?.id || ""} />
-          <input type="hidden" name="defaultDate" value={defaultDate} />
+          <input type="hidden" name="defaultDate" value={selectedDate} />
           <button
             type="submit"
             disabled={isSubmitting || !csvText.trim()}
