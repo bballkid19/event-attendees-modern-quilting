@@ -6,9 +6,13 @@
 // creates for real orders. Useful for backfilling attendees from before the
 // app went live, or adding walk-in / manually-taken registrations.
 //
+// Product selection is a type-to-search box (like searching products
+// anywhere else in Shopify admin) rather than a dropdown, since a full
+// product list is unusable on stores with thousands of products.
+//
 // CSV columns (header row required, case-insensitive):
 //   Product   — optional. Exact product title. If left blank, the row uses
-//               whichever event you pick from the "Default event" dropdown.
+//               whichever event you searched for and selected above.
 //   Date      — required. The event date/session, e.g. "Aug 15 2026 10:00 AM".
 //   Name      — required. Attendee's name.
 //   Email     — optional.
@@ -17,7 +21,7 @@
 
 import { useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { useActionData, useLoaderData, useNavigation, Form } from "react-router";
+import { useActionData, useFetcher, useNavigation, Form } from "react-router";
 import { authenticate } from "../shopify.server";
 
 type EventProduct = { id: string; title: string };
@@ -68,40 +72,43 @@ function parseCsv(text: string): Record<string, string>[] {
 }
 
 // ---------- Shared helpers ----------
-async function getEventProducts(admin: any): Promise<EventProduct[]> {
-  const products: EventProduct[] = [];
-  let after: string | null = null;
-  let pages = 0;
-  // Cap how many products we scan — adjust higher if the shop has more
-  // than ~2,000 products and event products are further down the list.
-  const MAX_PAGES = 20;
 
-  do {
-    const res = await admin.graphql(
-      `#graphql
-      query($after: String) {
-        products(first: 100, after: $after) {
-          pageInfo { hasNextPage endCursor }
-          nodes {
-            id
-            title
-            metafield(namespace: "custom", key: "event_dates") { id }
-          }
-        }
-      }`,
-      { variables: { after } },
-    );
-    const body = await res.json();
-    const conn = body?.data?.products;
-    if (!conn) break;
-    conn.nodes.forEach((n: any) => {
-      if (n.metafield) products.push({ id: n.id, title: n.title });
-    });
-    after = conn.pageInfo.hasNextPage ? conn.pageInfo.endCursor : null;
-    pages += 1;
-  } while (after && pages < MAX_PAGES);
+// Search products by title. No tag/metafield filtering — works for any
+// store regardless of how many products it has or how events are tagged.
+async function searchProducts(admin: any, term: string): Promise<EventProduct[]> {
+  const cleanTerm = term.trim();
+  if (!cleanTerm) return [];
 
-  return products;
+  const res = await admin.graphql(
+    `#graphql
+    query($query: String!) {
+      products(first: 20, query: $query) {
+        nodes { id title }
+      }
+    }`,
+    { variables: { query: `title:*${cleanTerm}*` } },
+  );
+  const body = await res.json();
+  const nodes = body?.data?.products?.nodes || [];
+  return nodes.map((n: any) => ({ id: n.id, title: n.title }));
+}
+
+// Look up a single product's GID by exact title match — used when a CSV
+// row specifies its own "Product" column.
+async function findProductByTitle(admin: any, title: string): Promise<string | null> {
+  const res = await admin.graphql(
+    `#graphql
+    query($query: String!) {
+      products(first: 5, query: $query) {
+        nodes { id title }
+      }
+    }`,
+    { variables: { query: `title:'${title.replace(/'/g, "\\'")}'` } },
+  );
+  const body = await res.json();
+  const nodes = body?.data?.products?.nodes || [];
+  const exact = nodes.find((n: any) => n.title.toLowerCase() === title.toLowerCase());
+  return (exact || nodes[0])?.id || null;
 }
 
 async function saveRegistration(admin: any, fields: Record<string, string>) {
@@ -127,35 +134,53 @@ async function saveRegistration(admin: any, fields: Record<string, string>) {
   return errs && errs.length ? errs[0].message : null;
 }
 
-// ---------- Loader: list of event products for the dropdown ----------
+// ---------- Loader: nothing to preload — search happens via fetcher ----------
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  const { admin } = await authenticate.admin(request);
-  const products = await getEventProducts(admin);
-  return { products };
+  await authenticate.admin(request);
+  return null;
 };
 
-// ---------- Action: parse the CSV and create registrations ----------
+// ---------- Combined action: handles both product search and CSV import ----------
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { admin } = await authenticate.admin(request);
   const formData = await request.formData();
+  const intent = String(formData.get("intent") || "");
+
+  // --- Product search (called live as the person types) ---
+  if (intent === "search") {
+    const term = String(formData.get("term") || "");
+    const products = await searchProducts(admin, term);
+    return { intent: "search", products };
+  }
+
+  // --- CSV import ---
   const csvText = String(formData.get("csvText") || "");
   const defaultProductId = String(formData.get("defaultProductId") || "");
-
-  const products = await getEventProducts(admin);
-  const byTitle = new Map(products.map((p) => [p.title.toLowerCase(), p.id]));
 
   const rows = parseCsv(csvText);
   let created = 0;
   const skipped: { row: number; reason: string }[] = [];
+  const titleCache = new Map<string, string | null>();
 
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
     const name = r.name || "";
     const productTitle = r.product || "";
-    const productId = productTitle ? byTitle.get(productTitle.toLowerCase()) : defaultProductId;
+
+    let productId: string | null = defaultProductId || null;
+    if (productTitle) {
+      const key = productTitle.toLowerCase();
+      if (!titleCache.has(key)) {
+        titleCache.set(key, await findProductByTitle(admin, productTitle));
+      }
+      productId = titleCache.get(key) || null;
+    }
 
     if (!productId) {
-      skipped.push({ row: i + 2, reason: productTitle ? `Unknown product "${productTitle}"` : "No product selected" });
+      skipped.push({
+        row: i + 2,
+        reason: productTitle ? `Couldn't find product "${productTitle}"` : "No product selected",
+      });
       continue;
     }
     if (!name) {
@@ -184,16 +209,32 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     }
   }
 
-  return { created, skipped, total: rows.length };
+  return { intent: "import", created, skipped, total: rows.length };
 };
 
 // ---------- Page ----------
 export default function ImportAttendees() {
-  const { products } = useLoaderData<typeof loader>();
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
+  const searchFetcher = useFetcher<typeof action>();
+
   const [csvText, setCsvText] = useState("");
+  const [searchTerm, setSearchTerm] = useState("");
+  const [selectedProduct, setSelectedProduct] = useState<EventProduct | null>(null);
+
   const isSubmitting = navigation.state === "submitting";
+  const searchResults: EventProduct[] =
+    searchFetcher.data && searchFetcher.data.intent === "search" ? searchFetcher.data.products : [];
+
+  function runSearch(term: string) {
+    setSearchTerm(term);
+    setSelectedProduct(null);
+    if (term.trim().length < 2) return;
+    const fd = new FormData();
+    fd.set("intent", "search");
+    fd.set("term", term);
+    searchFetcher.submit(fd, { method: "post" });
+  }
 
   function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -205,22 +246,55 @@ export default function ImportAttendees() {
 
   return (
     <s-page heading="Import Attendees">
-      <s-section heading="1. Choose a default event">
+      <s-section heading="1. Find the default event">
         <s-paragraph>
-          Used for any CSV row that doesn't include a "Product" column.
+          Search by product name. This is used for any CSV row that doesn't include its own "Product" column.
         </s-paragraph>
-        <select
-          form="import-form"
-          name="defaultProductId"
+        <input
+          type="text"
+          value={searchTerm}
+          onChange={(e) => runSearch(e.target.value)}
+          placeholder="Start typing a product name…"
           style={{ padding: "8px", borderRadius: "6px", width: "100%", maxWidth: "420px" }}
-        >
-          <option value="">— Select an event product —</option>
-          {products.map((p: EventProduct) => (
-            <option key={p.id} value={p.id}>
-              {p.title}
-            </option>
-          ))}
-        </select>
+        />
+
+        {selectedProduct ? (
+          <p style={{ marginTop: "10px" }}>
+            Selected: <strong>{selectedProduct.title}</strong>{" "}
+            <button type="button" onClick={() => { setSelectedProduct(null); setSearchTerm(""); }}>
+              Change
+            </button>
+          </p>
+        ) : searchResults.length > 0 ? (
+          <ul style={{ listStyle: "none", padding: 0, marginTop: "10px", maxWidth: "420px" }}>
+            {searchResults.map((p) => (
+              <li key={p.id}>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedProduct(p);
+                    setSearchTerm(p.title);
+                  }}
+                  style={{
+                    display: "block",
+                    width: "100%",
+                    textAlign: "left",
+                    padding: "8px 10px",
+                    border: "1px solid #ddd",
+                    borderRadius: "6px",
+                    marginBottom: "4px",
+                    background: "#fff",
+                    cursor: "pointer",
+                  }}
+                >
+                  {p.title}
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : searchTerm.trim().length >= 2 && searchFetcher.state === "idle" ? (
+          <p style={{ marginTop: "10px", color: "#666" }}>No matching products found.</p>
+        ) : null}
       </s-section>
 
       <s-section heading="2. Upload or paste your CSV">
@@ -241,8 +315,10 @@ export default function ImportAttendees() {
       </s-section>
 
       <s-section>
-        <Form method="post" id="import-form">
+        <Form method="post">
+          <input type="hidden" name="intent" value="import" />
           <input type="hidden" name="csvText" value={csvText} />
+          <input type="hidden" name="defaultProductId" value={selectedProduct?.id || ""} />
           <button
             type="submit"
             disabled={isSubmitting || !csvText.trim()}
@@ -261,7 +337,7 @@ export default function ImportAttendees() {
         </Form>
       </s-section>
 
-      {actionData ? (
+      {actionData && actionData.intent === "import" ? (
         <s-section heading="Results">
           <s-paragraph>
             Created <strong>{actionData.created}</strong> of {actionData.total} row(s).
