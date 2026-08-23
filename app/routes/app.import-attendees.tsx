@@ -149,7 +149,7 @@ async function getVariants(admin: any, productId: string): Promise<ProductVarian
 
   // No real variants — parse the Event Dates metafield text instead.
   const raw = product?.metafield?.value || "";
-  if (!raw) return [];
+if (!raw) return [{ id: "debug-empty", title: "[DEBUG: metafield value was empty/not found]" }];
 
   // Split on a date-time pattern boundary: look for occurrences of
   // MM/DD/YYYY (with an optional time following) and treat each as its
@@ -161,7 +161,7 @@ async function getVariants(admin: any, productId: string): Promise<ProductVarian
 
   // Fall back to treating the whole string as one date if it didn't match
   // the expected pattern (covers formats we haven't anticipated).
-  return [{ id: "metafield-0", title: raw.trim() }];
+  return [{ id: "metafield-0", title: `[DEBUG raw: ${JSON.stringify(raw)}]` }];
 }
 
 // Look up a single product's GID by exact title match — used when a CSV
