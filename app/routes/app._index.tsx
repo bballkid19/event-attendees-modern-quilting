@@ -169,6 +169,13 @@ export default function Index() {
           </s-link>{" "}
           mutation demo, to provide a starting point for app development.
         </s-paragraph>
+        <s-paragraph>
+          Need to bulk-add attendees? Use the{" "}
+          <s-link href="/app/import-attendees">
+            CSV import page
+          </s-link>
+          .
+        </s-paragraph>
       </s-section>
       <s-section heading="Get started with products">
         <s-paragraph>
