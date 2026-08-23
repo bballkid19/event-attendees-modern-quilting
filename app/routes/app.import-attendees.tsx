@@ -120,8 +120,11 @@ async function searchProducts(admin: any, term: string): Promise<EventProduct[]>
   return nodes.map((n: any) => ({ id: n.id, title: n.title }));
 }
 
-// Fetch a product's variants — each variant title is one of its event
-// dates, matching exactly what the calendar section already displays.
+// Fetch a product's dates. Prefers real variants (each variant title is a
+// date, matching the "Test Quilting Class" pattern). If the product only
+// has the default single variant, falls back to parsing the product's own
+// custom.event_dates metafield text — which can hold one or more dates
+// space- or comma-separated, e.g. "08/24/2026 5:30 PM 09/02/2026 5:30 PM".
 async function getVariants(admin: any, productId: string): Promise<ProductVariant[]> {
   const res = await admin.graphql(
     `#graphql
@@ -130,13 +133,35 @@ async function getVariants(admin: any, productId: string): Promise<ProductVarian
         variants(first: 100) {
           nodes { id title }
         }
+        metafield(namespace: "custom", key: "event_dates") { value }
       }
     }`,
     { variables: { id: productId } },
   );
   const body = await res.json();
-  const nodes = body?.data?.product?.variants?.nodes || [];
-  return nodes.map((n: any) => ({ id: n.id, title: n.title }));
+  const product = body?.data?.product;
+  const variantNodes = product?.variants?.nodes || [];
+
+  const realVariants = variantNodes.filter((n: any) => n.title && n.title !== "Default Title");
+  if (realVariants.length) {
+    return realVariants.map((n: any) => ({ id: n.id, title: n.title }));
+  }
+
+  // No real variants — parse the Event Dates metafield text instead.
+  const raw = product?.metafield?.value || "";
+  if (!raw) return [];
+
+  // Split on a date-time pattern boundary: look for occurrences of
+  // MM/DD/YYYY (with an optional time following) and treat each as its
+  // own date, since the field may have no separator between them.
+  const matches = raw.match(/\d{1,2}\/\d{1,2}\/\d{4}(?:\s+\d{1,2}:\d{2}\s*[AaPp][Mm])?/g);
+  if (matches && matches.length) {
+    return matches.map((m: string, i: number) => ({ id: `metafield-${i}`, title: m.trim() }));
+  }
+
+  // Fall back to treating the whole string as one date if it didn't match
+  // the expected pattern (covers formats we haven't anticipated).
+  return [{ id: "metafield-0", title: raw.trim() }];
 }
 
 // Look up a single product's GID by exact title match — used when a CSV
@@ -407,7 +432,8 @@ export default function ImportAttendees() {
             </select>
           ) : (
             <p style={{ color: "#666" }}>
-              This event has no dates set up as variants yet — add one on the product first.
+              Couldn't find any dates for this event — check that it has either date
+              variants or an "Event Dates" value filled in.
             </p>
           )}
         </s-section>
