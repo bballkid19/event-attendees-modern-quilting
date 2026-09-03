@@ -214,23 +214,24 @@ function AddAttendeeForm({ productId, date, onAdded, onCancel }) {
   );
 }
 
-// Small inline control: pick a different date for this one attendee, then
-// confirm with "Move". If both the old and new dates map to tracked
-// Shopify variants, this also adjusts real inventory: +1 back on the old
-// date, -1 on the new date, so "spots left" stays accurate. Dates without
-// tracked inventory (e.g. metafield-only products) are simply skipped for
-// the inventory step — only the registration's date changes for those.
+// Small inline control: shows every other date for this event as its own
+// button — clicking one immediately proposes moving the attendee there
+// (with a confirmation), rather than relying on a native <select> dropdown,
+// which doesn't render reliably inside Shopify's admin extension iframe.
 function MoveControl({ person, dateOptions, eventDates, onMoved }) {
   const options = dateOptions.filter((d) => d.toLowerCase() !== (person.event_date || '').toLowerCase());
-  const [target, setTarget] = useState(options[0] || '');
   const [moving, setMoving] = useState(false);
 
   if (!options.length) {
     return <s-text tone="subdued">No other dates for this event to move to yet.</s-text>;
   }
 
-  async function handleMove() {
-    if (!target) return;
+  async function handleMove(target) {
+    const confirmed = window.confirm(
+      `Move ${person.attendee_name} to ${shortDateLabel(target)}?`,
+    );
+    if (!confirmed) return;
+
     setMoving(true);
     try {
       const fromInfo = eventDates[(person.event_date || '').toLowerCase()];
@@ -280,20 +281,13 @@ function MoveControl({ person, dateOptions, eventDates, onMoved }) {
   }
 
   return (
-    <s-stack direction="inline" gap="tight">
-      <select
-        value={target}
-        onChange={(e) => setTarget(e.target.value)}
-        disabled={moving}
-        style={{ padding: '4px 6px', borderRadius: '6px' }}
-      >
-        {options.map((d) => (
-          <option key={d} value={d}>{shortDateLabel(d)}</option>
-        ))}
-      </select>
-      <s-button variant="tertiary" onClick={handleMove} disabled={moving}>
-        {moving ? 'Moving…' : 'Move'}
-      </s-button>
+    <s-stack direction="block" gap="tight">
+      <s-text tone="subdued">Move to:</s-text>
+      {options.map((d) => (
+        <s-button key={d} variant="tertiary" onClick={() => handleMove(d)} disabled={moving}>
+          {moving ? 'Moving…' : shortDateLabel(d)}
+        </s-button>
+      ))}
     </s-stack>
   );
 }
