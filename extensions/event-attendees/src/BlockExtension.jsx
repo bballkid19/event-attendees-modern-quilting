@@ -52,14 +52,11 @@ function toMap(node) {
 }
 
 function copyText(text) {
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).then(
-      () => window.alert('Emails copied to clipboard.'),
-      () => window.prompt('Copy failed — copy manually:', text),
-    );
-  } else {
-    window.prompt('Copy this list:', text);
-  }
+  // The Clipboard API is unreliable inside Shopify's sandboxed admin
+  // extension iframe (often silently blocked, with no error and no
+  // fallback firing). window.prompt is universally reliable here: it
+  // shows the text pre-selected, so pressing Ctrl+C (or Cmd+C) copies it.
+  window.prompt('Copy these emails (Ctrl+C, then Cancel):', text);
 }
 
 function AddAttendeeForm({ productId, date, onAdded, onCancel }) {
