@@ -91,6 +91,19 @@ const UPDATE_DATE_MUTATION = `
   }
 `;
 
+// A variant title can be a single date ("Aug 15 2026 10:00 AM") or a
+// pipe-separated group of dates ("08/06/2026 10:00 AM | 08/13/2026...")
+// for event types that bundle a whole month as one registration. This
+// builds a short, readable label for the dropdown without changing the
+// underlying value used to match/save the date.
+function shortDateLabel(title) {
+  if (!title.includes('|')) return title;
+  const parts = title.split('|').map((p) => p.trim()).filter(Boolean);
+  if (!parts.length) return title;
+  const first = parts[0];
+  return `${first} (+${parts.length - 1} more, ${parts.length} sessions)`;
+}
+
 function toMap(node) {
   const m = { id: node.id };
   (node.fields || []).forEach((f) => { m[f.key] = f.value; });
@@ -275,7 +288,7 @@ function MoveControl({ person, dateOptions, eventDates, onMoved }) {
         style={{ padding: '4px 6px', borderRadius: '6px' }}
       >
         {options.map((d) => (
-          <option key={d} value={d}>{d}</option>
+          <option key={d} value={d}>{shortDateLabel(d)}</option>
         ))}
       </select>
       <s-button variant="tertiary" onClick={handleMove} disabled={moving}>
@@ -450,7 +463,7 @@ function Attendees() {
           return (
             <s-stack direction="block" gap="tight" key={g.date}>
               <s-stack direction="inline" gap="base" inlineAlignment="space-between">
-                <s-text fontWeight="bold">{g.date}</s-text>
+                <s-text fontWeight="bold">{shortDateLabel(g.date)}</s-text>
                 <s-badge tone={badgeTone}>
                   {showCapacity ? `${g.count} of ${total} spots filled` : `${g.count} attending`}
                 </s-badge>
