@@ -25,8 +25,7 @@ api_version = "2026-10"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "read_orders,read_products,read_metaobjects,write_metaobjects"
-
+scopes = "read_orders,read_products,read_metaobjects,write_metaobjects,read_inventory,write_inventory"
 [auth]
 redirect_urls = [ "https://magnificent-alignment-production-373e.up.railway.app/api/auth" ]
 
