@@ -51,14 +51,6 @@ function toMap(node) {
   return m;
 }
 
-function copyText(text) {
-  // The Clipboard API is unreliable inside Shopify's sandboxed admin
-  // extension iframe (often silently blocked, with no error and no
-  // fallback firing). window.prompt is universally reliable here: it
-  // shows the text pre-selected, so pressing Ctrl+C (or Cmd+C) copies it.
-  window.prompt('Copy these emails (Ctrl+C, then Cancel):', text);
-}
-
 function AddAttendeeForm({ productId, date, onAdded, onCancel }) {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -223,15 +215,6 @@ function Attendees() {
     setAddingForDate(null);
   }
 
-  function copyEmails(group) {
-    const emails = group.people.map((p) => p.attendee_email).filter(Boolean);
-    if (!emails.length) {
-      window.alert('No emails saved for this date yet.');
-      return;
-    }
-    copyText(emails.join(', '));
-  }
-
   if (state.loading) {
     return (
       <s-admin-block heading="Event Attendees">
@@ -292,9 +275,6 @@ function Attendees() {
             </s-stack>
 
             <s-stack direction="inline" gap="base">
-              <s-button variant="tertiary" onClick={() => copyEmails(g)}>
-                Copy emails
-              </s-button>
               {addingForDate === g.date ? null : (
                 <s-button variant="tertiary" onClick={() => setAddingForDate(g.date)}>
                   + Add attendee
