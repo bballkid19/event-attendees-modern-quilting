@@ -212,7 +212,9 @@ function MoveControl({ person, dateOptions, eventDates, onMoved }) {
   const [target, setTarget] = useState(options[0] || '');
   const [moving, setMoving] = useState(false);
 
-  if (!options.length) return null;
+  if (!options.length) {
+    return <s-text tone="subdued">No other dates for this event to move to yet.</s-text>;
+  }
 
   async function handleMove() {
     if (!target) return;
