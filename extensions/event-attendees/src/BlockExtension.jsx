@@ -1,7 +1,8 @@
 // extensions/event-attendees/src/BlockExtension.jsx
 //
 // Shows on the product details page. Reads saved "event_registration"
-// metaobjects (NOT orders) and lists attendees grouped by date. Each
+// metaobjects (NOT orders) and lists attendees grouped by date. Each date
+// has a "Copy emails" button and an inline "Add attendee" form, and each
 // attendee has a Remove button so a cancellation can be taken off the list.
 
 import { render } from 'preact';
@@ -32,10 +33,96 @@ const DELETE_MUTATION = `
   }
 `;
 
+const CREATE_MUTATION = `
+  mutation CreateRegistration($metaobject: MetaobjectCreateInput!) {
+    metaobjectCreate(metaobject: $metaobject) {
+      metaobject {
+        id
+        fields { key value }
+      }
+      userErrors { field message }
+    }
+  }
+`;
+
 function toMap(node) {
   const m = { id: node.id };
   (node.fields || []).forEach((f) => { m[f.key] = f.value; });
   return m;
+}
+
+function copyText(text) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(
+      () => window.alert('Emails copied to clipboard.'),
+      () => window.prompt('Copy failed — copy manually:', text),
+    );
+  } else {
+    window.prompt('Copy this list:', text);
+  }
+}
+
+function AddAttendeeForm({ productId, date, onAdded, onCancel }) {
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [quantity, setQuantity] = useState('1');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  async function handleSave() {
+    if (!name.trim()) {
+      setError('Name is required.');
+      return;
+    }
+    setSaving(true);
+    setError('');
+    try {
+      const res = await shopify.query(CREATE_MUTATION, {
+        variables: {
+          metaobject: {
+            type: 'event_registration',
+            fields: [
+              { key: 'event_product', value: productId },
+              { key: 'event_date', value: date },
+              { key: 'attendee_name', value: name.trim() },
+              { key: 'attendee_email', value: email.trim() },
+              { key: 'quantity', value: quantity || '1' },
+              { key: 'order_name', value: 'Added manually' },
+              { key: 'ordered_at', value: new Date().toISOString() },
+            ],
+          },
+        },
+      });
+      const errs = res?.data?.metaobjectCreate?.userErrors;
+      if (errs && errs.length) {
+        setError(errs[0].message);
+        setSaving(false);
+        return;
+      }
+      const node = res?.data?.metaobjectCreate?.metaobject;
+      if (node) onAdded(toMap(node));
+    } catch (e) {
+      setError(String((e && e.message) || e));
+      setSaving(false);
+    }
+  }
+
+  return (
+    <s-stack direction="block" gap="tight">
+      <s-text-field label="Name" value={name} onChange={(e) => setName(e.target.value)} />
+      <s-text-field label="Email (optional)" value={email} onChange={(e) => setEmail(e.target.value)} />
+      <s-text-field label="Quantity" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
+      {error ? <s-text tone="critical">{error}</s-text> : null}
+      <s-stack direction="inline" gap="base">
+        <s-button variant="primary" onClick={handleSave} disabled={saving}>
+          {saving ? 'Adding…' : 'Save'}
+        </s-button>
+        <s-button variant="tertiary" onClick={onCancel} disabled={saving}>
+          Cancel
+        </s-button>
+      </s-stack>
+    </s-stack>
+  );
 }
 
 function Attendees() {
@@ -43,6 +130,7 @@ function Attendees() {
   const productId = data?.selected?.[0]?.id;
   const [state, setState] = useState({ loading: true, error: '', groups: [] });
   const [removingId, setRemovingId] = useState(null);
+  const [addingForDate, setAddingForDate] = useState(null);
 
   async function loadAttendees() {
     setState((s) => ({ ...s, loading: true, error: '' }));
@@ -118,6 +206,35 @@ function Attendees() {
     }
   }
 
+  function handleAdded(date, newPerson) {
+    setState((s) => {
+      let found = false;
+      const groups = s.groups.map((g) => {
+        if (g.date !== date) return g;
+        found = true;
+        const people = [...g.people, newPerson].sort((a, b) =>
+          (a.attendee_name || '').localeCompare(b.attendee_name || ''));
+        const count = people.reduce((n, p) => n + (parseInt(p.quantity, 10) || 1), 0);
+        return { ...g, people, count };
+      });
+      if (!found) {
+        groups.push({ date, count: parseInt(newPerson.quantity, 10) || 1, people: [newPerson] });
+        groups.sort((a, b) => a.date.localeCompare(b.date));
+      }
+      return { ...s, groups };
+    });
+    setAddingForDate(null);
+  }
+
+  function copyEmails(group) {
+    const emails = group.people.map((p) => p.attendee_email).filter(Boolean);
+    if (!emails.length) {
+      window.alert('No emails saved for this date yet.');
+      return;
+    }
+    copyText(emails.join(', '));
+  }
+
   if (state.loading) {
     return (
       <s-admin-block heading="Event Attendees">
@@ -132,13 +249,6 @@ function Attendees() {
       </s-admin-block>
     );
   }
-  if (!state.groups.length) {
-    return (
-      <s-admin-block heading="Event Attendees">
-        <s-text tone="subdued">No attendees saved yet. New orders will appear here automatically.</s-text>
-      </s-admin-block>
-    );
-  }
 
   const totalDates = state.groups.length;
   const totalAttendees = state.groups.reduce((n, g) => n + g.count, 0);
@@ -146,11 +256,16 @@ function Attendees() {
   return (
     <s-admin-block heading="Event Attendees">
       <s-stack direction="block" gap="base">
-        <s-text tone="subdued">
-          {totalDates} {totalDates === 1 ? 'date' : 'dates'} · {totalAttendees} total {totalAttendees === 1 ? 'attendee' : 'attendees'}
-        </s-text>
-
-        <s-divider />
+        {state.groups.length ? (
+          <>
+            <s-text tone="subdued">
+              {totalDates} {totalDates === 1 ? 'date' : 'dates'} · {totalAttendees} total {totalAttendees === 1 ? 'attendee' : 'attendees'}
+            </s-text>
+            <s-divider />
+          </>
+        ) : (
+          <s-text tone="subdued">No attendees saved yet. New orders will appear here automatically.</s-text>
+        )}
 
         {state.groups.map((g, gi) => (
           <s-stack direction="block" gap="tight" key={g.date}>
@@ -179,10 +294,111 @@ function Attendees() {
               ))}
             </s-stack>
 
+            <s-stack direction="inline" gap="base">
+              <s-button variant="tertiary" onClick={() => copyEmails(g)}>
+                Copy emails
+              </s-button>
+              {addingForDate === g.date ? null : (
+                <s-button variant="tertiary" onClick={() => setAddingForDate(g.date)}>
+                  + Add attendee
+                </s-button>
+              )}
+            </s-stack>
+
+            {addingForDate === g.date ? (
+              <AddAttendeeForm
+                productId={productId}
+                date={g.date}
+                onAdded={(person) => handleAdded(g.date, person)}
+                onCancel={() => setAddingForDate(null)}
+              />
+            ) : null}
+
             {gi < state.groups.length - 1 ? <s-divider /> : null}
           </s-stack>
         ))}
+
+        {!state.groups.length ? (
+          addingForDate === '__new__' ? (
+            <NewDateAddForm
+              productId={productId}
+              onAdded={(date, person) => handleAdded(date, person)}
+              onCancel={() => setAddingForDate(null)}
+            />
+          ) : (
+            <s-button variant="tertiary" onClick={() => setAddingForDate('__new__')}>
+              + Add attendee
+            </s-button>
+          )
+        ) : null}
       </s-stack>
     </s-admin-block>
+  );
+}
+
+// Used only when a product has no attendees yet — collects the date and
+// the attendee's details together in one form.
+function NewDateAddForm({ productId, onAdded, onCancel }) {
+  const [date, setDate] = useState('');
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [quantity, setQuantity] = useState('1');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  async function handleSave() {
+    if (!date.trim() || !name.trim()) {
+      setError('Date and name are both required.');
+      return;
+    }
+    setSaving(true);
+    setError('');
+    try {
+      const res = await shopify.query(CREATE_MUTATION, {
+        variables: {
+          metaobject: {
+            type: 'event_registration',
+            fields: [
+              { key: 'event_product', value: productId },
+              { key: 'event_date', value: date.trim() },
+              { key: 'attendee_name', value: name.trim() },
+              { key: 'attendee_email', value: email.trim() },
+              { key: 'quantity', value: quantity || '1' },
+              { key: 'order_name', value: 'Added manually' },
+              { key: 'ordered_at', value: new Date().toISOString() },
+            ],
+          },
+        },
+      });
+      const errs = res?.data?.metaobjectCreate?.userErrors;
+      if (errs && errs.length) {
+        setError(errs[0].message);
+        setSaving(false);
+        return;
+      }
+      const node = res?.data?.metaobjectCreate?.metaobject;
+      if (node) onAdded(date.trim(), toMap(node));
+    } catch (e) {
+      setError(String((e && e.message) || e));
+      setSaving(false);
+    }
+  }
+
+  return (
+    <s-stack direction="block" gap="tight">
+      <s-text-field label="Date" placeholder="Aug 15 2026 10:00 AM" value={date} onChange={(e) => setDate(e.target.value)} />
+      <s-text-field label="Name" value={name} onChange={(e) => setName(e.target.value)} />
+      <s-text-field label="Email (optional)" value={email} onChange={(e) => setEmail(e.target.value)} />
+      <s-text-field label="Quantity" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
+      {error ? <s-text tone="critical">{error}</s-text> : null}
+      <s-stack direction="inline" gap="base">
+        <s-button variant="primary" onClick={handleSave} disabled={saving}>
+          {saving ? 'Adding…' : 'Save'}
+        </s-button>
+        <s-button variant="tertiary" onClick={onCancel} disabled={saving}>
+          Cancel
+        </s-button>
+      </s-stack>
+    </s-stack>
   );
 }
