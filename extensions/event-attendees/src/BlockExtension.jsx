@@ -53,14 +53,6 @@ const PRODUCT_DATES_QUERY = `
   }
 `;
 
-const ADJUST_INVENTORY_MUTATION = `
-  mutation AdjustInventory($input: InventoryAdjustQuantitiesInput!) {
-    inventoryAdjustQuantities(input: $input) {
-      userErrors { field message }
-    }
-  }
-`;
-
 const DELETE_MUTATION = `
   mutation DeleteRegistration($id: ID!) {
     metaobjectDelete(id: $id) {
@@ -91,10 +83,18 @@ const UPDATE_DATE_MUTATION = `
   }
 `;
 
+const ADJUST_INVENTORY_MUTATION = `
+  mutation AdjustInventory($input: InventoryAdjustQuantitiesInput!) {
+    inventoryAdjustQuantities(input: $input) {
+      userErrors { field message }
+    }
+  }
+`;
+
 // A variant title can be a single date ("Aug 15 2026 10:00 AM") or a
 // pipe-separated group of dates ("08/06/2026 10:00 AM | 08/13/2026...")
 // for event types that bundle a whole month as one registration. This
-// builds a short, readable label for the dropdown without changing the
+// builds a short, readable label for display without changing the
 // underlying value used to match/save the date.
 function shortDateLabel(title) {
   if (!title.includes('|')) return title;
@@ -149,6 +149,25 @@ async function loadEventDates(productId) {
     map[title.toLowerCase()] = { title, tracked: false, inventoryQuantity: null };
   });
   return map;
+}
+
+// Reusable clickable list of dates, used both for picking a date when
+// adding the very first attendee and for Move. A native <select> dropdown
+// doesn't render reliably inside Shopify's admin extension iframe, so both
+// places use this same button-list pattern instead.
+function DatePicker({ options, onPick, disabled }) {
+  if (!options.length) {
+    return <s-text tone="subdued">No dates found for this event yet.</s-text>;
+  }
+  return (
+    <s-stack direction="block" gap="tight">
+      {options.map((d) => (
+        <s-button key={d} variant="tertiary" onClick={() => onPick(d)} disabled={disabled}>
+          {shortDateLabel(d)}
+        </s-button>
+      ))}
+    </s-stack>
+  );
 }
 
 function AddAttendeeForm({ productId, date, onAdded, onCancel }) {
@@ -214,10 +233,94 @@ function AddAttendeeForm({ productId, date, onAdded, onCancel }) {
   );
 }
 
-// Small inline control: shows every other date for this event as its own
-// button — clicking one immediately proposes moving the attendee there
-// (with a confirmation), rather than relying on a native <select> dropdown,
-// which doesn't render reliably inside Shopify's admin extension iframe.
+// Used only when a product has no attendees yet — first pick the date from
+// the event's real dates, then fill in the attendee's details.
+function NewDateAddForm({ productId, dateOptions, onAdded, onCancel }) {
+  const [date, setDate] = useState('');
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [quantity, setQuantity] = useState('1');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  if (!date) {
+    return (
+      <s-stack direction="block" gap="tight">
+        <s-text tone="subdued">Pick a date:</s-text>
+        <DatePicker options={dateOptions} onPick={setDate} disabled={false} />
+        <s-button variant="tertiary" onClick={onCancel}>
+          Cancel
+        </s-button>
+      </s-stack>
+    );
+  }
+
+  async function handleSave() {
+    if (!name.trim()) {
+      setError('Name is required.');
+      return;
+    }
+    setSaving(true);
+    setError('');
+    try {
+      const res = await shopify.query(CREATE_MUTATION, {
+        variables: {
+          metaobject: {
+            type: 'event_registration',
+            fields: [
+              { key: 'event_product', value: productId },
+              { key: 'event_date', value: date },
+              { key: 'attendee_name', value: name.trim() },
+              { key: 'attendee_email', value: email.trim() },
+              { key: 'quantity', value: quantity || '1' },
+              { key: 'order_name', value: 'Added manually' },
+              { key: 'ordered_at', value: new Date().toISOString() },
+            ],
+          },
+        },
+      });
+      const errs = res?.data?.metaobjectCreate?.userErrors;
+      if (errs && errs.length) {
+        setError(errs[0].message);
+        setSaving(false);
+        return;
+      }
+      const node = res?.data?.metaobjectCreate?.metaobject;
+      if (node) onAdded(date, toMap(node));
+    } catch (e) {
+      setError(String((e && e.message) || e));
+      setSaving(false);
+    }
+  }
+
+  return (
+    <s-stack direction="block" gap="tight">
+      <s-text tone="subdued">Date: {shortDateLabel(date)}</s-text>
+      <s-text-field label="Name" value={name} onChange={(e) => setName(e.target.value)} />
+      <s-text-field label="Email (optional)" value={email} onChange={(e) => setEmail(e.target.value)} />
+      <s-text-field label="Quantity" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
+      {error ? <s-text tone="critical">{error}</s-text> : null}
+      <s-stack direction="inline" gap="base">
+        <s-button variant="primary" onClick={handleSave} disabled={saving}>
+          {saving ? 'Adding…' : 'Save'}
+        </s-button>
+        <s-button variant="tertiary" onClick={() => setDate('')} disabled={saving}>
+          Back
+        </s-button>
+        <s-button variant="tertiary" onClick={onCancel} disabled={saving}>
+          Cancel
+        </s-button>
+      </s-stack>
+    </s-stack>
+  );
+}
+
+// Shows every other date for this event as its own button — clicking one
+// immediately proposes moving the attendee there (with a confirmation). If
+// both the old and new dates map to tracked Shopify variants, this also
+// adjusts real inventory: +1 back on the old date, -1 on the new date, so
+// "spots left" stays accurate. Dates without tracked inventory (e.g.
+// metafield-only products) simply skip the inventory step.
 function MoveControl({ person, dateOptions, eventDates, onMoved }) {
   const options = dateOptions.filter((d) => d.toLowerCase() !== (person.event_date || '').toLowerCase());
   const [moving, setMoving] = useState(false);
@@ -283,11 +386,7 @@ function MoveControl({ person, dateOptions, eventDates, onMoved }) {
   return (
     <s-stack direction="block" gap="tight">
       <s-text tone="subdued">Move to:</s-text>
-      {options.map((d) => (
-        <s-button key={d} variant="tertiary" onClick={() => handleMove(d)} disabled={moving}>
-          {moving ? 'Moving…' : shortDateLabel(d)}
-        </s-button>
-      ))}
+      <DatePicker options={options} onPick={handleMove} disabled={moving} />
     </s-stack>
   );
 }
@@ -406,8 +505,6 @@ function Attendees() {
       return { ...s, groups: regroup(allPeople) };
     });
     setMovingFor(null);
-    // Real inventory changed on Shopify's side — refresh the capacity
-    // numbers so the badges reflect the new spots-left counts.
     if (inventoryAdjusted && productId) {
       loadEventDates(productId).then(setEventDates).catch(() => {});
     }
@@ -526,6 +623,7 @@ function Attendees() {
           addingForDate === '__new__' ? (
             <NewDateAddForm
               productId={productId}
+              dateOptions={allDateOptions}
               onAdded={(date, person) => handleAdded(date, person)}
               onCancel={() => setAddingForDate(null)}
             />
@@ -537,72 +635,5 @@ function Attendees() {
         ) : null}
       </s-stack>
     </s-admin-block>
-  );
-}
-
-// Used only when a product has no attendees yet — collects the date and
-// the attendee's details together in one form.
-function NewDateAddForm({ productId, onAdded, onCancel }) {
-  const [date, setDate] = useState('');
-  const [name, setName] = useState('');
-  const [email, setEmail] = useState('');
-  const [quantity, setQuantity] = useState('1');
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState('');
-
-  async function handleSave() {
-    if (!date.trim() || !name.trim()) {
-      setError('Date and name are both required.');
-      return;
-    }
-    setSaving(true);
-    setError('');
-    try {
-      const res = await shopify.query(CREATE_MUTATION, {
-        variables: {
-          metaobject: {
-            type: 'event_registration',
-            fields: [
-              { key: 'event_product', value: productId },
-              { key: 'event_date', value: date.trim() },
-              { key: 'attendee_name', value: name.trim() },
-              { key: 'attendee_email', value: email.trim() },
-              { key: 'quantity', value: quantity || '1' },
-              { key: 'order_name', value: 'Added manually' },
-              { key: 'ordered_at', value: new Date().toISOString() },
-            ],
-          },
-        },
-      });
-      const errs = res?.data?.metaobjectCreate?.userErrors;
-      if (errs && errs.length) {
-        setError(errs[0].message);
-        setSaving(false);
-        return;
-      }
-      const node = res?.data?.metaobjectCreate?.metaobject;
-      if (node) onAdded(date.trim(), toMap(node));
-    } catch (e) {
-      setError(String((e && e.message) || e));
-      setSaving(false);
-    }
-  }
-
-  return (
-    <s-stack direction="block" gap="tight">
-      <s-text-field label="Date" placeholder="Aug 15 2026 10:00 AM" value={date} onChange={(e) => setDate(e.target.value)} />
-      <s-text-field label="Name" value={name} onChange={(e) => setName(e.target.value)} />
-      <s-text-field label="Email (optional)" value={email} onChange={(e) => setEmail(e.target.value)} />
-      <s-text-field label="Quantity" value={quantity} onChange={(e) => setQuantity(e.target.value)} />
-      {error ? <s-text tone="critical">{error}</s-text> : null}
-      <s-stack direction="inline" gap="base">
-        <s-button variant="primary" onClick={handleSave} disabled={saving}>
-          {saving ? 'Adding…' : 'Save'}
-        </s-button>
-        <s-button variant="tertiary" onClick={onCancel} disabled={saving}>
-          Cancel
-        </s-button>
-      </s-stack>
-    </s-stack>
   );
 }
