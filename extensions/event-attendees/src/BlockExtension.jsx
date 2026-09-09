@@ -444,10 +444,9 @@ function Attendees() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [productId]);
 
-  async function handleRemove(person) {
-    const confirmed = window.confirm(`Remove ${person.attendee_name} from ${person.event_date}?`);
-    if (!confirmed) return;
-
+async function handleRemove(person) {
+  console.log('DEBUG: handleRemove called for', person.attendee_name);
+  const confirmed = window.confirm(`Remove ${person.attendee_name} from ${person.event_date}?`);
     setRemovingId(person.id);
     try {
       const res = await shopify.query(DELETE_MUTATION, { variables: { id: person.id } });
