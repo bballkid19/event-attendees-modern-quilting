@@ -397,6 +397,7 @@ function Attendees() {
   const [state, setState] = useState({ loading: true, error: '', groups: [] });
   const [eventDates, setEventDates] = useState({});
   const [removingId, setRemovingId] = useState(null);
+  const [confirmingRemoveId, setConfirmingRemoveId] = useState(null);
   const [addingForDate, setAddingForDate] = useState(null);
   const [movingFor, setMovingFor] = useState(null);
 
@@ -444,9 +445,8 @@ function Attendees() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [productId]);
 
-async function handleRemove(person) {
-  console.log('DEBUG: handleRemove called for', person.attendee_name);
-  const confirmed = window.confirm(`Remove ${person.attendee_name} from ${person.event_date}?`);
+  async function handleRemove(person) {
+    setConfirmingRemoveId(null);
     setRemovingId(person.id);
     try {
       const res = await shopify.query(DELETE_MUTATION, { variables: { id: person.id } });
@@ -574,14 +574,30 @@ async function handleRemove(person) {
                             Move
                           </s-button>
                         )}
-                        <s-button
-                          variant="tertiary"
-                          tone="critical"
-                          onClick={() => handleRemove(p)}
-                          disabled={removingId === p.id}
-                        >
-                          {removingId === p.id ? 'Removing…' : 'Remove'}
-                        </s-button>
+                        {confirmingRemoveId === p.id ? (
+                          <s-stack direction="inline" gap="tight">
+                            <s-text tone="critical">Remove?</s-text>
+                            <s-button
+                              variant="tertiary"
+                              tone="critical"
+                              onClick={() => handleRemove(p)}
+                              disabled={removingId === p.id}
+                            >
+                              {removingId === p.id ? 'Removing…' : 'Yes, remove'}
+                            </s-button>
+                            <s-button variant="tertiary" onClick={() => setConfirmingRemoveId(null)}>
+                              Cancel
+                            </s-button>
+                          </s-stack>
+                        ) : (
+                          <s-button
+                            variant="tertiary"
+                            tone="critical"
+                            onClick={() => setConfirmingRemoveId(p.id)}
+                          >
+                            Remove
+                          </s-button>
+                        )}
                       </s-stack>
                     </s-stack>
                     {movingFor === p.id ? (
