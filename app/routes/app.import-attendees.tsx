@@ -3,30 +3,35 @@
 // A page inside the embedded app (reached at /app/import-attendees) that lets
 // you paste or upload a CSV of attendees and create one saved
 // "event_registration" per row — the same kind of record the live webhook
-// creates for real orders. Useful for backfilling attendees from before the
-// app went live, from a RainPOS export, or adding walk-in registrations.
+// creates for real orders.
 //
-// Product selection is a type-to-search box (like searching products
-// anywhere else in Shopify admin) rather than a dropdown, since a full
-// product list is unusable on stores with thousands of products. Once an
-// event is selected, its actual variant titles (the dates your calendar
-// already uses) populate a dropdown — no free-typed date to mistype.
+// Date handling follows the store's Event Registration Mode:
 //
-// Two CSV shapes are understood automatically:
+//   - registration_mode == "separate_registration": the product's real
+//     variants ARE its dates — show the variant list, require one choice.
 //
-// Simple format — header row (case-insensitive):
-//   Product, Date, Name, Email, Quantity, Order
-//   Product and Order are optional per row. Date falls back to the
-//   dropdown selection below if a row doesn't have one.
+//   - registration_mode == "single_registration" with only the Default
+//     Title variant: this is ONE registration covering every meeting in
+//     the series (e.g. "Beginning Quilting with Nancy at Night" — six
+//     dates, one purchase). No date selector is shown; the complete,
+//     unmodified Event Dates metafield value is stored as the attendee's
+//     event_date, exactly as written (including its [bracket] grouping).
 //
-// RainPOS export — header row exactly:
-//   Transaction ID, Last Name, First Name, Attendees, Email, Phone,
-//   Cell, Seats, Price, Transaction Notes, Materials
-//   Detected automatically. "Attendees" (e.g. "Nancy Miller; Sue Miller; ")
-//   is split on ";" into one registration per named attendee. If it's
-//   blank, First + Last Name is used instead. Every row uses the selected
-//   event and date below, since RainPOS exports don't include a product
-//   or date column — the whole file is one class session.
+//   - registration_mode == "single_registration" with real Session/Class
+//     Package variants: show the package list (each variant is a whole
+//     package), never split a package into its individual meeting dates.
+//
+//   - No registration_mode set at all (older/simpler products): falls
+//     back to the original behavior — use real variants if present,
+//     otherwise parse individual dates out of the Event Dates metafield
+//     text. This keeps older products (like "Test Quilting Class") working
+//     exactly as before.
+//
+// Two CSV shapes are understood automatically: a simple sheet with
+// Product, Date, Name, Email, Quantity, Order columns, or a direct RainPOS
+// class export (Transaction ID, Last Name, First Name, Attendees, Email,
+// Phone, Cell, Seats, Price…), where "Attendees" like "Jane Doe; Sue Doe;"
+// becomes two separate registrations.
 
 import { useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
@@ -34,7 +39,7 @@ import { useActionData, useFetcher, useNavigation, Form } from "react-router";
 import { authenticate } from "../shopify.server";
 
 type EventProduct = { id: string; title: string };
-type ProductVariant = { id: string; title: string };
+type DateOption = { id: string; title: string };
 
 // ---------- CSV parsing (no external library — handles quoted commas) ----------
 function parseCsvLine(line: string): string[] {
@@ -100,12 +105,9 @@ function resolveNames(row: Record<string, string>): string[] {
 
 // ---------- Shared helpers ----------
 
-// Search products by title. No tag/metafield filtering — works for any
-// store regardless of how many products it has.
 async function searchProducts(admin: any, term: string): Promise<EventProduct[]> {
   const cleanTerm = term.trim();
   if (!cleanTerm) return [];
-
   const res = await admin.graphql(
     `#graphql
     query($query: String!) {
@@ -120,52 +122,6 @@ async function searchProducts(admin: any, term: string): Promise<EventProduct[]>
   return nodes.map((n: any) => ({ id: n.id, title: n.title }));
 }
 
-// Fetch a product's dates. Prefers real variants (each variant title is a
-// date, matching the "Test Quilting Class" pattern). If the product only
-// has the default single variant, falls back to parsing the product's own
-// custom.event_dates metafield text — which can hold one or more dates
-// space- or comma-separated, e.g. "08/24/2026 5:30 PM 09/02/2026 5:30 PM".
-async function getVariants(admin: any, productId: string): Promise<ProductVariant[]> {
-  const res = await admin.graphql(
-    `#graphql
-    query($id: ID!) {
-      product(id: $id) {
-        variants(first: 100) {
-          nodes { id title }
-        }
-        metafield(namespace: "custom", key: "event_dates") { value }
-      }
-    }`,
-    { variables: { id: productId } },
-  );
-  const body = await res.json();
-  const product = body?.data?.product;
-  const variantNodes = product?.variants?.nodes || [];
-
-  const realVariants = variantNodes.filter((n: any) => n.title && n.title !== "Default Title");
-  if (realVariants.length) {
-    return realVariants.map((n: any) => ({ id: n.id, title: n.title }));
-  }
-
-  // No real variants — parse the Event Dates metafield text instead.
-  const raw = product?.metafield?.value || "";
-if (!raw) return [{ id: "debug-empty", title: "[DEBUG: metafield value was empty/not found]" }];
-
-  // Split on a date-time pattern boundary: look for occurrences of
-  // MM/DD/YYYY (with an optional time following) and treat each as its
-  // own date, since the field may have no separator between them.
-  const matches = raw.match(/\d{1,2}\/\d{1,2}\/\d{4}(?:\s+\d{1,2}:\d{2}\s*[AaPp][Mm])?/g);
-  if (matches && matches.length) {
-    return matches.map((m: string, i: number) => ({ id: `metafield-${i}`, title: m.trim() }));
-  }
-
-  // Fall back to treating the whole string as one date if it didn't match
-  // the expected pattern (covers formats we haven't anticipated).
-  return [{ id: "metafield-0", title: `[DEBUG raw: ${JSON.stringify(raw)}]` }];
-}
-
-// Look up a single product's GID by exact title match — used when a CSV
-// row specifies its own "Product" column.
 async function findProductByTitle(admin: any, title: string): Promise<string | null> {
   const res = await admin.graphql(
     `#graphql
@@ -180,6 +136,81 @@ async function findProductByTitle(admin: any, title: string): Promise<string | n
   const nodes = body?.data?.products?.nodes || [];
   const exact = nodes.find((n: any) => n.title.toLowerCase() === title.toLowerCase());
   return (exact || nodes[0])?.id || null;
+}
+
+// Parses individual dates out of a metafield text blob by scanning for
+// MM/DD/YYYY (with optional time) patterns. Only used as a last-resort
+// fallback for older products with no registration_mode set at all.
+function parseIndividualDates(raw: string): string[] {
+  if (!raw) return [];
+  const matches = raw.match(/\d{1,2}\/\d{1,2}\/\d{4}(?:\s+\d{1,2}:\d{2}\s*[AaPp][Mm])?/g);
+  if (matches && matches.length) return matches.map((m) => m.trim());
+  return [raw.trim()];
+}
+
+// Figures out what date options (if any) to present for a product,
+// following the store's Event Registration Mode rules. Returns:
+//   - options: the list of choosable dates/packages (empty if none needed)
+//   - autoDate: a date to use automatically with no selector shown
+//     (the whole-series case), or null if a choice is required/available
+async function getDateOptions(
+  admin: any,
+  productId: string,
+): Promise<{ options: DateOption[]; autoDate: string | null }> {
+  const res = await admin.graphql(
+    `#graphql
+    query($id: ID!) {
+      product(id: $id) {
+        variants(first: 100) {
+          nodes { id title }
+        }
+        registrationMode: metafield(namespace: "custom", key: "event_registration_mode") { value }
+        eventDates: metafield(namespace: "custom", key: "event_dates") { value }
+      }
+    }`,
+    { variables: { id: productId } },
+  );
+  const body = await res.json();
+  const product = body?.data?.product;
+  const variantNodes = product?.variants?.nodes || [];
+  const realVariants = variantNodes.filter((v: any) => v.title && v.title !== "Default Title");
+  const mode = (product?.registrationMode?.value || "").toLowerCase();
+  const rawDates = product?.eventDates?.value || "";
+
+  if (mode === "single_registration") {
+    if (realVariants.length) {
+      // Multiple whole packages — show them as options, never split.
+      return {
+        options: realVariants.map((v: any) => ({ id: v.id, title: v.title })),
+        autoDate: null,
+      };
+    }
+    // One registration covers the entire series. No choice to make —
+    // preserve the complete Event Dates value exactly as written.
+    return { options: [], autoDate: rawDates || null };
+  }
+
+  if (mode === "separate_registration") {
+    return {
+      options: realVariants.map((v: any) => ({ id: v.id, title: v.title })),
+      autoDate: null,
+    };
+  }
+
+  // No registration_mode set — fall back to the original behavior for
+  // older/simpler products: real variants if present, else split the
+  // metafield text into individual selectable dates.
+  if (realVariants.length) {
+    return {
+      options: realVariants.map((v: any) => ({ id: v.id, title: v.title })),
+      autoDate: null,
+    };
+  }
+  const parsed = parseIndividualDates(rawDates);
+  return {
+    options: parsed.map((title, i) => ({ id: `metafield-${i}`, title })),
+    autoDate: null,
+  };
 }
 
 async function saveRegistration(admin: any, fields: Record<string, string>) {
@@ -205,30 +236,61 @@ async function saveRegistration(admin: any, fields: Record<string, string>) {
   return errs && errs.length ? errs[0].message : null;
 }
 
+async function loadExistingKeys(admin: any, productId: string): Promise<Set<string>> {
+  const keys = new Set<string>();
+  let after: string | null = null;
+  let pages = 0;
+  do {
+    const res = await admin.graphql(
+      `#graphql
+      query($after: String) {
+        metaobjects(type: "event_registration", first: 250, after: $after) {
+          pageInfo { hasNextPage endCursor }
+          nodes { fields { key value } }
+        }
+      }`,
+      { variables: { after } },
+    );
+    const body = await res.json();
+    const conn = body?.data?.metaobjects;
+    if (!conn) break;
+    conn.nodes.forEach((n: any) => {
+      const m: Record<string, string> = {};
+      (n.fields || []).forEach((f: any) => (m[f.key] = f.value));
+      if (m.event_product === productId) {
+        keys.add(`${m.event_date}|||${(m.attendee_name || "").toLowerCase()}`);
+      }
+    });
+    after = conn.pageInfo.hasNextPage ? conn.pageInfo.endCursor : null;
+    pages += 1;
+  } while (after && pages < 30);
+  return keys;
+}
+
 // ---------- Loader ----------
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   await authenticate.admin(request);
   return null;
 };
 
-// ---------- Combined action: product search, variant lookup, and CSV import ----------
+// ---------- Combined action: product search, date lookup, and CSV import ----------
 export const action = async ({ request }: ActionFunctionArgs) => {
   const { admin } = await authenticate.admin(request);
   const formData = await request.formData();
   const intent = String(formData.get("intent") || "");
 
-  // --- Product search (called live as the person types) ---
   if (intent === "search") {
     const term = String(formData.get("term") || "");
     const products = await searchProducts(admin, term);
     return { intent: "search", products };
   }
 
-  // --- Fetch a product's dates (variants), called after picking an event ---
-  if (intent === "variants") {
+  if (intent === "dates") {
     const productId = String(formData.get("productId") || "");
-    const variants = productId ? await getVariants(admin, productId) : [];
-    return { intent: "variants", variants };
+    const result = productId
+      ? await getDateOptions(admin, productId)
+      : { options: [], autoDate: null };
+    return { intent: "dates", ...result };
   }
 
   // --- CSV import ---
@@ -238,13 +300,14 @@ export const action = async ({ request }: ActionFunctionArgs) => {
 
   const rows = parseCsv(csvText);
   let created = 0;
+  let duplicates = 0;
   const skipped: { row: number; reason: string }[] = [];
   const titleCache = new Map<string, string | null>();
+  const existingKeysCache = new Map<string, Set<string>>();
 
   for (let i = 0; i < rows.length; i++) {
     const r = rows[i];
 
-    // Resolve the product for this row.
     let productId: string | null = defaultProductId || null;
     const productTitle = r.product || "";
     if (productTitle) {
@@ -275,14 +338,22 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       continue;
     }
 
+    if (!existingKeysCache.has(productId)) {
+      existingKeysCache.set(productId, await loadExistingKeys(admin, productId));
+    }
+    const existingKeys = existingKeysCache.get(productId)!;
+
     const email = r.email || "";
     const order = r["transaction id"] || r.order || "Manual import";
-    // If the row lists multiple named attendees (RainPOS's "Attendees"
-    // column), each is its own registration of quantity 1. Otherwise use
-    // the row's own quantity/seats value for a single combined name.
     const perNameQuantity = names.length > 1 ? "1" : r.quantity || r.seats || "1";
 
     for (const name of names) {
+      const dupeKey = `${date}|||${name.toLowerCase()}`;
+      if (existingKeys.has(dupeKey)) {
+        duplicates += 1;
+        continue;
+      }
+
       const err = await saveRegistration(admin, {
         event_product: productId,
         event_date: date,
@@ -296,12 +367,13 @@ export const action = async ({ request }: ActionFunctionArgs) => {
       if (err) {
         skipped.push({ row: i + 2, reason: err });
       } else {
+        existingKeys.add(dupeKey);
         created += 1;
       }
     }
   }
 
-  return { intent: "import", created, skipped, total: rows.length };
+  return { intent: "import", created, duplicates, skipped, total: rows.length };
 };
 
 // ---------- Page ----------
@@ -309,7 +381,7 @@ export default function ImportAttendees() {
   const actionData = useActionData<typeof action>();
   const navigation = useNavigation();
   const searchFetcher = useFetcher<typeof action>();
-  const variantFetcher = useFetcher<typeof action>();
+  const dateFetcher = useFetcher<typeof action>();
 
   const [csvText, setCsvText] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
@@ -319,9 +391,11 @@ export default function ImportAttendees() {
   const isSubmitting = navigation.state === "submitting";
   const searchResults: EventProduct[] =
     searchFetcher.data && searchFetcher.data.intent === "search" ? searchFetcher.data.products : [];
-  const variants: ProductVariant[] =
-    variantFetcher.data && variantFetcher.data.intent === "variants" ? variantFetcher.data.variants : [];
-  const loadingVariants = variantFetcher.state !== "idle";
+
+  const dateData = dateFetcher.data && dateFetcher.data.intent === "dates" ? dateFetcher.data : null;
+  const dateOptions: DateOption[] = dateData?.options || [];
+  const autoDate: string | null = dateData?.autoDate || null;
+  const loadingDates = dateFetcher.state !== "idle";
 
   function runSearch(term: string) {
     setSearchTerm(term);
@@ -339,9 +413,9 @@ export default function ImportAttendees() {
     setSearchTerm(p.title);
     setSelectedDate("");
     const fd = new FormData();
-    fd.set("intent", "variants");
+    fd.set("intent", "dates");
     fd.set("productId", p.id);
-    variantFetcher.submit(fd, { method: "post" });
+    dateFetcher.submit(fd, { method: "post" });
   }
 
   function handleFile(e: React.ChangeEvent<HTMLInputElement>) {
@@ -351,6 +425,8 @@ export default function ImportAttendees() {
     reader.onload = () => setCsvText(String(reader.result || ""));
     reader.readAsText(file);
   }
+
+  const effectiveDate = autoDate || selectedDate;
 
   return (
     <s-page heading="Import Attendees">
@@ -410,30 +486,40 @@ export default function ImportAttendees() {
       </s-section>
 
       {selectedProduct ? (
-        <s-section heading="2. Pick the date">
-          <s-paragraph>
-            Used for every row unless a row's CSV has its own "Date" column. These are the actual dates
-            set up on this event.
-          </s-paragraph>
-          {loadingVariants ? (
-            <p>Loading dates…</p>
-          ) : variants.length ? (
-            <select
-              value={selectedDate}
-              onChange={(e) => setSelectedDate(e.target.value)}
-              style={{ padding: "8px", borderRadius: "6px", width: "100%", maxWidth: "420px" }}
-            >
-              <option value="">— Select a date —</option>
-              {variants.map((v) => (
-                <option key={v.id} value={v.title}>
-                  {v.title}
-                </option>
-              ))}
-            </select>
+        <s-section heading="2. Date">
+          {loadingDates ? (
+            <p>Checking this event's registration type…</p>
+          ) : autoDate ? (
+            <>
+              <s-paragraph>
+                This is a single registration covering the whole series — no date to choose.
+                Every row will be attached to:
+              </s-paragraph>
+              <p style={{ fontFamily: "monospace", fontSize: "13px", background: "#f5f5f5", padding: "8px", borderRadius: "6px" }}>
+                {autoDate}
+              </p>
+            </>
+          ) : dateOptions.length ? (
+            <>
+              <s-paragraph>
+                Used for every row unless a row's CSV has its own "Date" column.
+              </s-paragraph>
+              <select
+                value={selectedDate}
+                onChange={(e) => setSelectedDate(e.target.value)}
+                style={{ padding: "8px", borderRadius: "6px", width: "100%", maxWidth: "420px" }}
+              >
+                <option value="">— Select a date —</option>
+                {dateOptions.map((d) => (
+                  <option key={d.id} value={d.title}>
+                    {d.title}
+                  </option>
+                ))}
+              </select>
+            </>
           ) : (
             <p style={{ color: "#666" }}>
-              Couldn't find any dates for this event — check that it has either date
-              variants or an "Event Dates" value filled in.
+              Couldn't find any dates for this event — check its variants or Event Dates metafield.
             </p>
           )}
         </s-section>
@@ -463,7 +549,7 @@ export default function ImportAttendees() {
           <input type="hidden" name="intent" value="import" />
           <input type="hidden" name="csvText" value={csvText} />
           <input type="hidden" name="defaultProductId" value={selectedProduct?.id || ""} />
-          <input type="hidden" name="defaultDate" value={selectedDate} />
+          <input type="hidden" name="defaultDate" value={effectiveDate} />
           <button
             type="submit"
             disabled={isSubmitting || !csvText.trim()}
@@ -486,6 +572,9 @@ export default function ImportAttendees() {
         <s-section heading="Results">
           <s-paragraph>
             Created <strong>{actionData.created}</strong> of {actionData.total} row(s).
+            {actionData.duplicates > 0 ? (
+              <> Skipped <strong>{actionData.duplicates}</strong> already on the list.</>
+            ) : null}
           </s-paragraph>
           {actionData.skipped.length > 0 ? (
             <>
