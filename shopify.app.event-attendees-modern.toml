@@ -2,7 +2,7 @@
 
 client_id = "a3b620bbe54443979930ec372632d5be"
 name = "event-attendees-modern"
-application_url = "https://shopify.dev/apps/default-app-home"
+application_url = "https://event-attendees-modern-quilting-production.up.railway.app"
 embedded = true
 
 [build]
@@ -28,4 +28,4 @@ api_version = "2026-10"
 scopes = "read_orders,read_products,read_metaobjects,write_metaobjects,read_inventory,write_inventory"
 
 [auth]
-redirect_urls = [ "https://shopify.dev/apps/default-app-home/api/auth" ]
+redirect_urls = [ "https://event-attendees-modern-quilting-production.up.railway.app" ]
