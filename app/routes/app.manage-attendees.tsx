@@ -40,6 +40,39 @@ function shortDateLabel(title: string) {
   return `${parts[0]} (+${parts.length - 1} more, ${parts.length} sessions)`;
 }
 
+// Pull every date out of an event label (single date or "|"-joined series).
+function labelDateRange(label: string): { first: number; last: number } | null {
+  const re = /(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})\s*([AaPp][Mm]))?/g;
+  const times: number[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(label || "")) !== null) {
+    let hour = m[4] ? parseInt(m[4], 10) % 12 : 0;
+    if (m[6] && m[6].toLowerCase() === "pm") hour += 12;
+    const d = new Date(parseInt(m[3], 10), parseInt(m[1], 10) - 1, parseInt(m[2], 10), hour, m[5] ? parseInt(m[5], 10) : 0);
+    if (!isNaN(d.getTime())) times.push(d.getTime());
+  }
+  if (!times.length) return null;
+  return { first: Math.min(...times), last: Math.max(...times) };
+}
+
+// Upcoming (soonest first) vs older (most recent first). A date counts as
+// older once the whole calendar day of its LAST date has passed. Labels with no
+// readable date stay in upcoming so nothing is hidden by mistake.
+function splitUpcomingOlder(groups: DateGroup[]) {
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const upcoming: { g: DateGroup; range: { first: number; last: number } | null }[] = [];
+  const older: { g: DateGroup; range: { first: number; last: number } }[] = [];
+  groups.forEach((g) => {
+    const range = labelDateRange(g.date);
+    if (range && range.last < startOfToday.getTime()) older.push({ g, range });
+    else upcoming.push({ g, range });
+  });
+  upcoming.sort((a, b) => (a.range ? a.range.first : Infinity) - (b.range ? b.range.first : Infinity));
+  older.sort((a, b) => b.range.last - a.range.last);
+  return { upcoming: upcoming.map((e) => e.g), older: older.map((e) => e.g) };
+}
+
 function fieldMap(node: any): Person {
   const m: any = { id: node.id };
   (node.fields || []).forEach((f: any) => (m[f.key] = f.value));
@@ -310,6 +343,7 @@ export default function ManageAttendees() {
   });
   const [addingForDate, setAddingForDate] = useState<string | null>(null);
   const [movingFor, setMovingFor] = useState<Person | null>(null);
+  const [showOlder, setShowOlder] = useState(false);
 
   const searchResults: EventProduct[] = searchFetcher.data?.intent === "search" ? searchFetcher.data.products : [];
   const groups: DateGroup[] = loadFetcher.data?.intent === "load" ? loadFetcher.data.groups : [];
@@ -384,6 +418,85 @@ export default function ManageAttendees() {
 
   const allDateOptions = Object.keys(dates).length ? Object.values(dates).map((d) => d.title) : groups.map((g) => g.date);
 
+  // Dates that exist on the product but have nobody registered yet, so a new
+  // date still shows up with an "+ Add attendee" button.
+  const knownDates = new Set(groups.map((g) => g.date.trim().toLowerCase()));
+  const emptyCandidates: DateGroup[] = Object.values(dates)
+    .filter((d) => d.title && !knownDates.has(d.title.trim().toLowerCase()) && labelDateRange(d.title))
+    .map((d) => ({ date: d.title, count: 0, people: [] }));
+  const emptyUpcoming = splitUpcomingOlder(emptyCandidates).upcoming;
+  const { upcoming, older } = splitUpcomingOlder([...groups, ...emptyUpcoming]);
+
+  function renderGroup(g: DateGroup) {
+  const info = dates[g.date.toLowerCase()];
+  const showCapacity = info?.tracked && info.inventoryQuantity != null;
+  const total = showCapacity ? (info!.inventoryQuantity as number) + g.count : null;
+
+  return (
+    <div key={g.date} style={{ marginBottom: "26px", paddingBottom: "18px", borderBottom: "1px solid #e5e5e5" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
+        <strong>{shortDateLabel(g.date)}</strong>
+        <span style={{ background: "#e8f6f4", color: "#3e9891", padding: "3px 10px", borderRadius: "999px", fontSize: "12px", fontWeight: 700 }}>
+          {showCapacity ? `${g.count} of ${total} spots filled` : `${g.count} attending`}
+        </span>
+      </div>
+
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
+        <tbody>
+          {g.people.map((p, i) => (
+            <tr key={p.id} style={{ borderBottom: "1px solid #f0f0f0" }}>
+              <td style={{ padding: "6px 4px", width: "24px", color: "#888" }}>{i + 1}</td>
+              <td style={{ padding: "6px 4px" }}>
+                {p.attendee_name}
+                {p.attendee_email ? <span style={{ color: "#888" }}> · {p.attendee_email}</span> : null}
+                {parseInt(p.quantity, 10) > 1 ? <span style={{ color: "#888" }}> · ×{p.quantity}</span> : null}
+              </td>
+              <td style={{ padding: "6px 4px", textAlign: "right", whiteSpace: "nowrap" }}>
+                {movingFor?.id === p.id ? (
+                  <span>
+                    <select
+                      onChange={(e) => {
+                        if (e.target.value) handleMove(p, e.target.value);
+                      }}
+                      style={{ marginRight: "8px" }}
+                    >
+                      <option value="">Move to…</option>
+                      {allDateOptions
+                        .filter((d) => d.toLowerCase() !== (p.event_date || "").toLowerCase())
+                        .map((d) => (
+                          <option key={d} value={d}>{shortDateLabel(d)}</option>
+                        ))}
+                    </select>
+                    <button type="button" onClick={() => setMovingFor(null)}>Cancel</button>
+                  </span>
+                ) : (
+                  <button type="button" onClick={() => setMovingFor(p)} style={{ marginRight: "10px" }}>
+                    Move
+                  </button>
+                )}
+                <button type="button" onClick={() => handleRemove(p)} style={{ color: "#b4534a" }}>
+                  Remove
+                </button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      {addingForDate === g.date ? (
+        <InlineAddForm
+          onSave={(name, email, qty) => handleAdd(g.date, name, email, qty)}
+          onCancel={() => setAddingForDate(null)}
+        />
+      ) : (
+        <button type="button" onClick={() => setAddingForDate(g.date)} style={{ marginTop: "8px" }}>
+          + Add attendee
+        </button>
+      )}
+    </div>
+  );
+  }
+
   return (
     <s-page heading="Manage Attendees">
       <s-section heading="Find the event">
@@ -422,78 +535,26 @@ export default function ManageAttendees() {
         <s-section heading={selectedProduct.title}>
           {loading ? (
             <p>Loading…</p>
-          ) : !groups.length ? (
+          ) : !groups.length && !upcoming.length ? (
             <p>No attendees saved yet.</p>
           ) : (
-            groups.map((g) => {
-              const info = dates[g.date.toLowerCase()];
-              const showCapacity = info?.tracked && info.inventoryQuantity != null;
-              const total = showCapacity ? (info!.inventoryQuantity as number) + g.count : null;
-
-              return (
-                <div key={g.date} style={{ marginBottom: "26px", paddingBottom: "18px", borderBottom: "1px solid #e5e5e5" }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "8px" }}>
-                    <strong>{shortDateLabel(g.date)}</strong>
-                    <span style={{ background: "#e8f6f4", color: "#3e9891", padding: "3px 10px", borderRadius: "999px", fontSize: "12px", fontWeight: 700 }}>
-                      {showCapacity ? `${g.count} of ${total} spots filled` : `${g.count} attending`}
-                    </span>
-                  </div>
-
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "13px" }}>
-                    <tbody>
-                      {g.people.map((p, i) => (
-                        <tr key={p.id} style={{ borderBottom: "1px solid #f0f0f0" }}>
-                          <td style={{ padding: "6px 4px", width: "24px", color: "#888" }}>{i + 1}</td>
-                          <td style={{ padding: "6px 4px" }}>
-                            {p.attendee_name}
-                            {p.attendee_email ? <span style={{ color: "#888" }}> · {p.attendee_email}</span> : null}
-                            {parseInt(p.quantity, 10) > 1 ? <span style={{ color: "#888" }}> · ×{p.quantity}</span> : null}
-                          </td>
-                          <td style={{ padding: "6px 4px", textAlign: "right", whiteSpace: "nowrap" }}>
-                            {movingFor?.id === p.id ? (
-                              <span>
-                                <select
-                                  onChange={(e) => {
-                                    if (e.target.value) handleMove(p, e.target.value);
-                                  }}
-                                  style={{ marginRight: "8px" }}
-                                >
-                                  <option value="">Move to…</option>
-                                  {allDateOptions
-                                    .filter((d) => d.toLowerCase() !== (p.event_date || "").toLowerCase())
-                                    .map((d) => (
-                                      <option key={d} value={d}>{shortDateLabel(d)}</option>
-                                    ))}
-                                </select>
-                                <button type="button" onClick={() => setMovingFor(null)}>Cancel</button>
-                              </span>
-                            ) : (
-                              <button type="button" onClick={() => setMovingFor(p)} style={{ marginRight: "10px" }}>
-                                Move
-                              </button>
-                            )}
-                            <button type="button" onClick={() => handleRemove(p)} style={{ color: "#b4534a" }}>
-                              Remove
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-
-                  {addingForDate === g.date ? (
-                    <InlineAddForm
-                      onSave={(name, email, qty) => handleAdd(g.date, name, email, qty)}
-                      onCancel={() => setAddingForDate(null)}
-                    />
-                  ) : (
-                    <button type="button" onClick={() => setAddingForDate(g.date)} style={{ marginTop: "8px" }}>
-                      + Add attendee
-                    </button>
-                  )}
+            <>
+              {upcoming.map((g) => renderGroup(g))}
+              {!upcoming.length ? <p>No upcoming dates.</p> : null}
+              {older.length ? (
+                <div style={{ marginTop: "8px" }}>
+                  <button type="button" onClick={() => setShowOlder((v) => !v)}>
+                    {showOlder ? "Hide Older Events" : `Show Older Events (${older.length} ${older.length === 1 ? "date" : "dates"})`}
+                  </button>
+                  {showOlder ? (
+                    <div style={{ marginTop: "16px" }}>
+                      <h3 style={{ color: "#888", margin: "0 0 14px" }}>Older Events</h3>
+                      {older.map((g) => renderGroup(g))}
+                    </div>
+                  ) : null}
                 </div>
-              );
-            })
+              ) : null}
+            </>
           )}
         </s-section>
       ) : null}
