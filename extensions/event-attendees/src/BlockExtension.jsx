@@ -5,6 +5,11 @@
 // shows a capacity badge (pulled from the matching variant's real
 // inventory, when available) and an inline "Add attendee" form. Each
 // attendee has Remove and Move-to-another-date actions.
+//
+// Remove/Move confirmations are built inline with on-page buttons rather
+// than window.confirm(), because native browser dialogs are silently
+// blocked inside Shopify's sandboxed admin extension iframe — they never
+// show, and the code sees "cancelled" every time with no error at all.
 
 import { render } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
@@ -25,11 +30,6 @@ const REGISTRATIONS_QUERY = `
   }
 `;
 
-// Real per-date variants (the "Test Quilting Class" pattern) plus the
-// product's own custom.event_dates metafield text, used as a fallback for
-// products that store dates as plain text instead of variants (the
-// "Harper Holdall" pattern). Mirrors the same logic used by the CSV
-// importer, so both places agree on what a product's dates are.
 const PRODUCT_DATES_QUERY = `
   query($id: ID!) {
     product(id: $id) {
@@ -91,11 +91,13 @@ const ADJUST_INVENTORY_MUTATION = `
   }
 `;
 
-// A variant title can be a single date ("Aug 15 2026 10:00 AM") or a
-// pipe-separated group of dates ("08/06/2026 10:00 AM | 08/13/2026...")
-// for event types that bundle a whole month as one registration. This
-// builds a short, readable label for display without changing the
-// underlying value used to match/save the date.
+// A published app has one real, fixed web address — this is Quilter's
+// Cupboard's. It has to be the full https:// URL (not a relative path)
+// because the panel runs in its own iframe with a different origin than
+// the app itself; a relative link would try to navigate inside that
+// iframe instead of to the real site.
+const APP_BASE_URL = 'https://event-attendees-modern-quilting-production.up.railway.app';
+
 function shortDateLabel(title) {
   if (!title.includes('|')) return title;
   const parts = title.split('|').map((p) => p.trim()).filter(Boolean);
@@ -110,9 +112,6 @@ function toMap(node) {
   return m;
 }
 
-// Parses a product's Event Dates metafield text into individual date
-// strings by scanning for MM/DD/YYYY (with an optional time) patterns —
-// same approach as the CSV importer, so results stay consistent.
 function parseMetafieldDates(raw) {
   if (!raw) return [];
   const matches = raw.match(/\d{1,2}\/\d{1,2}\/\d{4}(?:\s+\d{1,2}:\d{2}\s*[AaPp][Mm])?/g);
@@ -120,8 +119,6 @@ function parseMetafieldDates(raw) {
   return [raw.trim()];
 }
 
-// Fetches this event's known dates and, where available, real inventory
-// numbers. Returns a map keyed by lowercased date title.
 async function loadEventDates(productId) {
   const res = await shopify.query(PRODUCT_DATES_QUERY, { variables: { id: productId } });
   const product = res?.data?.product;
@@ -151,10 +148,9 @@ async function loadEventDates(productId) {
   return map;
 }
 
-// Reusable clickable list of dates, used both for picking a date when
-// adding the very first attendee and for Move. A native <select> dropdown
-// doesn't render reliably inside Shopify's admin extension iframe, so both
-// places use this same button-list pattern instead.
+// Reusable clickable list of dates. A native <select> dropdown doesn't
+// render reliably inside this iframe, so both Move and the first-attendee
+// date picker use this same button-list pattern instead.
 function DatePicker({ options, onPick, disabled }) {
   if (!options.length) {
     return <s-text tone="subdued">No dates found for this event yet.</s-text>;
@@ -233,8 +229,6 @@ function AddAttendeeForm({ productId, date, onAdded, onCancel }) {
   );
 }
 
-// Used only when a product has no attendees yet — first pick the date from
-// the event's real dates, then fill in the attendee's details.
 function NewDateAddForm({ productId, dateOptions, onAdded, onCancel }) {
   const [date, setDate] = useState('');
   const [name, setName] = useState('');
@@ -315,26 +309,17 @@ function NewDateAddForm({ productId, dateOptions, onAdded, onCancel }) {
   );
 }
 
-// Shows every other date for this event as its own button — clicking one
-// immediately proposes moving the attendee there (with a confirmation). If
-// both the old and new dates map to tracked Shopify variants, this also
-// adjusts real inventory: +1 back on the old date, -1 on the new date, so
-// "spots left" stays accurate. Dates without tracked inventory (e.g.
-// metafield-only products) simply skip the inventory step.
 function MoveControl({ person, dateOptions, eventDates, onMoved }) {
   const options = dateOptions.filter((d) => d.toLowerCase() !== (person.event_date || '').toLowerCase());
+  const [pendingTarget, setPendingTarget] = useState(null);
   const [moving, setMoving] = useState(false);
 
   if (!options.length) {
     return <s-text tone="subdued">No other dates for this event to move to yet.</s-text>;
   }
 
-  async function handleMove(target) {
-    const confirmed = window.confirm(
-      `Move ${person.attendee_name} to ${shortDateLabel(target)}?`,
-    );
-    if (!confirmed) return;
-
+  async function confirmMove() {
+    const target = pendingTarget;
     setMoving(true);
     try {
       const fromInfo = eventDates[(person.event_date || '').toLowerCase()];
@@ -383,10 +368,24 @@ function MoveControl({ person, dateOptions, eventDates, onMoved }) {
     }
   }
 
+  if (pendingTarget) {
+    return (
+      <s-stack direction="inline" gap="tight">
+        <s-text tone="critical">Move to {shortDateLabel(pendingTarget)}?</s-text>
+        <s-button variant="tertiary" tone="critical" onClick={confirmMove} disabled={moving}>
+          {moving ? 'Moving…' : 'Yes, move'}
+        </s-button>
+        <s-button variant="tertiary" onClick={() => setPendingTarget(null)} disabled={moving}>
+          Cancel
+        </s-button>
+      </s-stack>
+    );
+  }
+
   return (
     <s-stack direction="block" gap="tight">
       <s-text tone="subdued">Move to:</s-text>
-      <DatePicker options={options} onPick={handleMove} disabled={moving} />
+      <DatePicker options={options} onPick={setPendingTarget} disabled={moving} />
     </s-stack>
   );
 }
@@ -535,9 +534,19 @@ function Attendees() {
       <s-stack direction="block" gap="base">
         {state.groups.length ? (
           <>
-            <s-text tone="subdued">
-              {totalDates} {totalDates === 1 ? 'date' : 'dates'} · {totalAttendees} total {totalAttendees === 1 ? 'attendee' : 'attendees'}
-            </s-text>
+            <s-stack direction="inline" gap="base" inlineAlignment="space-between">
+              <s-text tone="subdued">
+                {totalDates} {totalDates === 1 ? 'date' : 'dates'} · {totalAttendees} total {totalAttendees === 1 ? 'attendee' : 'attendees'}
+              </s-text>
+              <a
+                href={`${APP_BASE_URL}/app/manage-attendees?productId=${encodeURIComponent(productId)}&title=${encodeURIComponent(data?.selected?.[0]?.title || '')}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ fontSize: '13px', fontWeight: 700, color: '#3e9891', textDecoration: 'none' }}
+              >
+                View full list
+              </a>
+            </s-stack>
             <s-divider />
           </>
         ) : (

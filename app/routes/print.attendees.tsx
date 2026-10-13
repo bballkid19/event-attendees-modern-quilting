@@ -1,6 +1,8 @@
 // app/routes/print.attendees.tsx
 //
-// Returns a print-optimised HTML sign-in sheet for one event product.
+// Returns a print-optimised HTML sign-in sheet for one event product, with
+// a "Download CSV" link at the top that fetches the same data as a
+// downloadable spreadsheet (?format=csv).
 // The print action extension points its `src` at /print/attendees?product=<gid>.
 
 import type { LoaderFunctionArgs } from "react-router";
@@ -10,6 +12,12 @@ function esc(s: string) {
   return String(s || "").replace(/[&<>"]/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string),
   );
+}
+
+function csvEscape(s: string) {
+  const v = String(s ?? "");
+  if (/[",\n]/.test(v)) return `"${v.replace(/"/g, '""')}"`;
+  return v;
 }
 
 function fieldMap(node: any): Record<string, string> {
@@ -22,8 +30,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { admin, cors } = await authenticate.admin(request);
   const url = new URL(request.url);
   const productGid = url.searchParams.get("product") || "";
+  const format = url.searchParams.get("format") || "html";
 
-  // Store name + the product's own title, so the sheet is self-labeled.
   let shopName = "";
   let productTitle = "";
   try {
@@ -39,10 +47,9 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     shopName = body?.data?.shop?.name || "";
     productTitle = body?.data?.product?.title || "";
   } catch {
-    // Non-fatal — the sheet still works without these.
+    // Non-fatal — the page still works without these.
   }
 
-  // Pull registrations, filter to this product, group by date.
   const rows: Record<string, string>[] = [];
   let after: string | null = null;
   let pages = 0;
@@ -74,9 +81,50 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     (byDate[d] || (byDate[d] = [])).push(r);
   });
 
+  // ---------- CSV output ----------
+  if (format === "csv") {
+    const header = ["Date", "Name", "Email", "Quantity", "Order", "Registered On"];
+    const lines = [header.map(csvEscape).join(",")];
+
+    Object.keys(byDate)
+      .sort()
+      .forEach((date) => {
+        const people = byDate[date].sort((a, b) =>
+          (a.attendee_name || "").localeCompare(b.attendee_name || ""),
+        );
+        people.forEach((p) => {
+          lines.push(
+            [
+              date,
+              p.attendee_name || "",
+              p.attendee_email || "",
+              p.quantity || "1",
+              p.order_name || "",
+              p.ordered_at || "",
+            ]
+              .map(csvEscape)
+              .join(","),
+          );
+        });
+      });
+
+    const csv = lines.join("\r\n");
+    const filenameSafe = (productTitle || "attendees").replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+
+    return cors(
+      new Response(csv, {
+        headers: {
+          "Content-Type": "text/csv; charset=utf-8",
+          "Content-Disposition": `attachment; filename="${filenameSafe}-attendees.csv"`,
+        },
+      }),
+    );
+  }
+
+  // ---------- HTML (printable) output ----------
   const sections = Object.keys(byDate)
     .sort()
-    .map((date, i) => {
+    .map((date) => {
       const people = byDate[date].sort((a, b) =>
         (a.attendee_name || "").localeCompare(b.attendee_name || ""),
       );
@@ -94,7 +142,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         )
         .join("");
       return `
-        <section class="date-block"${i > 0 ? ' style="page-break-before: auto;"' : ""}>
+        <section class="date-block">
           <div class="date-head">
             <h2>${esc(date)}</h2>
             <span class="count-pill">${count} ${count === 1 ? "attendee" : "attendees"}</span>
@@ -120,6 +168,8 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
     day: "numeric",
     year: "numeric",
   });
+
+  const csvUrl = `/print/attendees?product=${encodeURIComponent(productGid)}&format=csv`;
 
   const html = `<!doctype html>
   <html>
@@ -155,7 +205,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         justify-content: space-between;
         gap: 24px;
         padding-bottom: 18px;
-        margin-bottom: 28px;
+        margin-bottom: 18px;
         border-bottom: 3px solid var(--ink);
       }
 
@@ -182,6 +232,34 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         font-size: 11px;
         color: var(--muted);
         white-space: nowrap;
+      }
+
+      .toolbar {
+        display: flex;
+        justify-content: flex-end;
+        gap: 10px;
+        margin-bottom: 28px;
+      }
+
+      .toolbar a, .toolbar button {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 8px 14px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 700;
+        text-decoration: none;
+        border: 1px solid var(--rule);
+        background: #ffffff;
+        color: var(--ink);
+        cursor: pointer;
+      }
+
+      .toolbar a.primary {
+        background: var(--teal);
+        color: #ffffff;
+        border-color: var(--teal);
       }
 
       .date-block {
@@ -277,6 +355,7 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
 
       @media print {
         body { padding: 0.4in 0.5in; }
+        .toolbar { display: none; }
         .date-block { page-break-inside: avoid; }
       }
     </style>
@@ -288,6 +367,10 @@ export const loader = async ({ request }: LoaderFunctionArgs) => {
         <h1>${esc(productTitle) || "Attendee Sign-in Sheet"}</h1>
       </div>
       <div class="printed-on">Printed ${esc(today)}</div>
+    </div>
+    <div class="toolbar">
+      <a href="${csvUrl}" class="primary" download>⬇ Download CSV</a>
+      <button onclick="window.print()">🖨 Print</button>
     </div>
     ${sections || `<p class="empty">No registrations found for this event yet.</p>`}
   </body>
