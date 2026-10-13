@@ -106,6 +106,43 @@ function shortDateLabel(title) {
   return `${first} (+${parts.length - 1} more, ${parts.length} sessions)`;
 }
 
+// Pull every date out of an event label (works for single dates and for
+// multi-session labels joined with "|"). Returns { first, last } as
+// timestamps, or null if the label has no recognizable date.
+function labelDateRange(label) {
+  const re = /(\d{1,2})\/(\d{1,2})\/(\d{4})(?:\s+(\d{1,2}):(\d{2})\s*([AaPp][Mm]))?/g;
+  const times = [];
+  let m;
+  while ((m = re.exec(label || '')) !== null) {
+    let hour = m[4] ? parseInt(m[4], 10) % 12 : 0;
+    if (m[6] && m[6].toLowerCase() === 'pm') hour += 12;
+    const d = new Date(parseInt(m[3], 10), parseInt(m[1], 10) - 1, parseInt(m[2], 10), hour, m[5] ? parseInt(m[5], 10) : 0);
+    if (!isNaN(d.getTime())) times.push(d.getTime());
+  }
+  if (!times.length) return null;
+  return { first: Math.min(...times), last: Math.max(...times) };
+}
+
+// Split groups into upcoming (soonest first) and older (most recent first).
+// An event counts as "older" once the whole calendar day of its LAST date has
+// passed, so today's class still shows as upcoming all day. Labels with no
+// readable date stay in upcoming so nothing gets hidden by mistake.
+function splitUpcomingOlder(groups) {
+  const startOfToday = new Date();
+  startOfToday.setHours(0, 0, 0, 0);
+  const upcoming = [];
+  const older = [];
+  groups.forEach((g) => {
+    const range = labelDateRange(g.date);
+    const entry = { g, range };
+    if (range && range.last < startOfToday.getTime()) older.push(entry);
+    else upcoming.push(entry);
+  });
+  upcoming.sort((a, b) => (a.range ? a.range.first : Infinity) - (b.range ? b.range.first : Infinity));
+  older.sort((a, b) => b.range.last - a.range.last);
+  return { upcoming: upcoming.map((e) => e.g), older: older.map((e) => e.g) };
+}
+
 function toMap(node) {
   const m = { id: node.id };
   (node.fields || []).forEach((f) => { m[f.key] = f.value; });
@@ -399,6 +436,7 @@ function Attendees() {
   const [confirmingRemoveId, setConfirmingRemoveId] = useState(null);
   const [addingForDate, setAddingForDate] = useState(null);
   const [movingFor, setMovingFor] = useState(null);
+  const [showOlder, setShowOlder] = useState(false);
 
   async function loadAttendees() {
     setState((s) => ({ ...s, loading: true, error: '' }));
@@ -523,11 +561,102 @@ function Attendees() {
     );
   }
 
-  const totalDates = state.groups.length;
   const totalAttendees = state.groups.reduce((n, g) => n + g.count, 0);
   const allDateOptions = Object.keys(eventDates).length
     ? Object.values(eventDates).map((d) => d.title)
     : state.groups.map((g) => g.date);
+
+  const { upcoming, older } = splitUpcomingOlder(state.groups);
+
+  function renderGroup(g, showDivider) {
+      const capacityInfo = eventDates[g.date.toLowerCase()];
+      const showCapacity = capacityInfo && capacityInfo.tracked && capacityInfo.inventoryQuantity != null;
+      const total = showCapacity ? capacityInfo.inventoryQuantity + g.count : null;
+      const badgeTone = showCapacity && capacityInfo.inventoryQuantity <= 0 ? 'critical' : 'success';
+
+      return (
+        <s-stack direction="block" gap="tight" key={g.date}>
+          <s-stack direction="inline" gap="base" inlineAlignment="space-between">
+            <s-text fontWeight="bold">{shortDateLabel(g.date)}</s-text>
+            <s-badge tone={badgeTone}>
+              {showCapacity ? `${g.count} of ${total} spots filled` : `${g.count} attending`}
+            </s-badge>
+          </s-stack>
+
+          <s-stack direction="block" gap="extra-tight">
+            {g.people.map((p, i) => (
+              <s-stack direction="block" gap="extra-tight" key={p.id}>
+                <s-stack direction="inline" gap="base" inlineAlignment="space-between">
+                  <s-text>
+                    {i + 1}. {p.attendee_name}
+                    {p.attendee_email ? ` · ${p.attendee_email}` : ''}
+                    {parseInt(p.quantity, 10) > 1 ? ` · ×${p.quantity}` : ''}
+                  </s-text>
+                  <s-stack direction="inline" gap="tight">
+                    {movingFor === p.id ? null : (
+                      <s-button variant="tertiary" onClick={() => setMovingFor(p.id)}>
+                        Move
+                      </s-button>
+                    )}
+                    {confirmingRemoveId === p.id ? (
+                      <s-stack direction="inline" gap="tight">
+                        <s-text tone="critical">Remove?</s-text>
+                        <s-button
+                          variant="tertiary"
+                          tone="critical"
+                          onClick={() => handleRemove(p)}
+                          disabled={removingId === p.id}
+                        >
+                          {removingId === p.id ? 'Removing…' : 'Yes, remove'}
+                        </s-button>
+                        <s-button variant="tertiary" onClick={() => setConfirmingRemoveId(null)}>
+                          Cancel
+                        </s-button>
+                      </s-stack>
+                    ) : (
+                      <s-button
+                        variant="tertiary"
+                        tone="critical"
+                        onClick={() => setConfirmingRemoveId(p.id)}
+                      >
+                        Remove
+                      </s-button>
+                    )}
+                  </s-stack>
+                </s-stack>
+                {movingFor === p.id ? (
+                  <MoveControl
+                    person={p}
+                    dateOptions={allDateOptions}
+                    eventDates={eventDates}
+                    onMoved={handleMoved}
+                  />
+                ) : null}
+              </s-stack>
+            ))}
+          </s-stack>
+
+          <s-stack direction="inline" gap="base">
+            {addingForDate === g.date ? null : (
+              <s-button variant="tertiary" onClick={() => setAddingForDate(g.date)}>
+                + Add attendee
+              </s-button>
+            )}
+          </s-stack>
+
+          {addingForDate === g.date ? (
+            <AddAttendeeForm
+              productId={productId}
+              date={g.date}
+              onAdded={(person) => handleAdded(g.date, person)}
+              onCancel={() => setAddingForDate(null)}
+            />
+          ) : null}
+
+          {showDivider ? <s-divider /> : null}
+        </s-stack>
+      );
+  }
 
   return (
     <s-admin-block heading="Event Attendees">
@@ -536,7 +665,7 @@ function Attendees() {
           <>
             <s-stack direction="inline" gap="base" inlineAlignment="space-between">
               <s-text tone="subdued">
-                {totalDates} {totalDates === 1 ? 'date' : 'dates'} · {totalAttendees} total {totalAttendees === 1 ? 'attendee' : 'attendees'}
+                {upcoming.length} upcoming {upcoming.length === 1 ? 'date' : 'dates'}{older.length ? ` · ${older.length} older` : ''} · {totalAttendees} total {totalAttendees === 1 ? 'attendee' : 'attendees'}
               </s-text>
               <s-link
                 href={`${APP_BASE_URL}/app/manage-attendees?productId=${encodeURIComponent(productId)}&title=${encodeURIComponent(data?.selected?.[0]?.title || '')}`}
@@ -551,95 +680,26 @@ function Attendees() {
           <s-text tone="subdued">No attendees saved yet. New orders will appear here automatically.</s-text>
         )}
 
-        {state.groups.map((g, gi) => {
-          const capacityInfo = eventDates[g.date.toLowerCase()];
-          const showCapacity = capacityInfo && capacityInfo.tracked && capacityInfo.inventoryQuantity != null;
-          const total = showCapacity ? capacityInfo.inventoryQuantity + g.count : null;
-          const badgeTone = showCapacity && capacityInfo.inventoryQuantity <= 0 ? 'critical' : 'success';
+        {upcoming.map((g, gi) => renderGroup(g, gi < upcoming.length - 1))}
 
-          return (
-            <s-stack direction="block" gap="tight" key={g.date}>
-              <s-stack direction="inline" gap="base" inlineAlignment="space-between">
-                <s-text fontWeight="bold">{shortDateLabel(g.date)}</s-text>
-                <s-badge tone={badgeTone}>
-                  {showCapacity ? `${g.count} of ${total} spots filled` : `${g.count} attending`}
-                </s-badge>
+        {state.groups.length && !upcoming.length ? (
+          <s-text tone="subdued">No upcoming dates with attendees.</s-text>
+        ) : null}
+
+        {older.length ? (
+          <s-stack direction="block" gap="base">
+            <s-divider />
+            <s-button variant="tertiary" onClick={() => setShowOlder((v) => !v)}>
+              {showOlder ? 'Hide Older Events' : `Show Older Events (${older.length} ${older.length === 1 ? 'date' : 'dates'})`}
+            </s-button>
+            {showOlder ? (
+              <s-stack direction="block" gap="base">
+                <s-text fontWeight="bold" tone="subdued">Older Events</s-text>
+                {older.map((g, gi) => renderGroup(g, gi < older.length - 1))}
               </s-stack>
-
-              <s-stack direction="block" gap="extra-tight">
-                {g.people.map((p, i) => (
-                  <s-stack direction="block" gap="extra-tight" key={p.id}>
-                    <s-stack direction="inline" gap="base" inlineAlignment="space-between">
-                      <s-text>
-                        {i + 1}. {p.attendee_name}
-                        {p.attendee_email ? ` · ${p.attendee_email}` : ''}
-                        {parseInt(p.quantity, 10) > 1 ? ` · ×${p.quantity}` : ''}
-                      </s-text>
-                      <s-stack direction="inline" gap="tight">
-                        {movingFor === p.id ? null : (
-                          <s-button variant="tertiary" onClick={() => setMovingFor(p.id)}>
-                            Move
-                          </s-button>
-                        )}
-                        {confirmingRemoveId === p.id ? (
-                          <s-stack direction="inline" gap="tight">
-                            <s-text tone="critical">Remove?</s-text>
-                            <s-button
-                              variant="tertiary"
-                              tone="critical"
-                              onClick={() => handleRemove(p)}
-                              disabled={removingId === p.id}
-                            >
-                              {removingId === p.id ? 'Removing…' : 'Yes, remove'}
-                            </s-button>
-                            <s-button variant="tertiary" onClick={() => setConfirmingRemoveId(null)}>
-                              Cancel
-                            </s-button>
-                          </s-stack>
-                        ) : (
-                          <s-button
-                            variant="tertiary"
-                            tone="critical"
-                            onClick={() => setConfirmingRemoveId(p.id)}
-                          >
-                            Remove
-                          </s-button>
-                        )}
-                      </s-stack>
-                    </s-stack>
-                    {movingFor === p.id ? (
-                      <MoveControl
-                        person={p}
-                        dateOptions={allDateOptions}
-                        eventDates={eventDates}
-                        onMoved={handleMoved}
-                      />
-                    ) : null}
-                  </s-stack>
-                ))}
-              </s-stack>
-
-              <s-stack direction="inline" gap="base">
-                {addingForDate === g.date ? null : (
-                  <s-button variant="tertiary" onClick={() => setAddingForDate(g.date)}>
-                    + Add attendee
-                  </s-button>
-                )}
-              </s-stack>
-
-              {addingForDate === g.date ? (
-                <AddAttendeeForm
-                  productId={productId}
-                  date={g.date}
-                  onAdded={(person) => handleAdded(g.date, person)}
-                  onCancel={() => setAddingForDate(null)}
-                />
-              ) : null}
-
-              {gi < state.groups.length - 1 ? <s-divider /> : null}
-            </s-stack>
-          );
-        })}
+            ) : null}
+          </s-stack>
+        ) : null}
 
         {!state.groups.length ? (
           addingForDate === '__new__' ? (
