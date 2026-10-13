@@ -538,14 +538,12 @@ function Attendees() {
               <s-text tone="subdued">
                 {totalDates} {totalDates === 1 ? 'date' : 'dates'} · {totalAttendees} total {totalAttendees === 1 ? 'attendee' : 'attendees'}
               </s-text>
-              <a
+              <s-link
                 href={`${APP_BASE_URL}/app/manage-attendees?productId=${encodeURIComponent(productId)}&title=${encodeURIComponent(data?.selected?.[0]?.title || '')}`}
                 target="_blank"
-                rel="noopener noreferrer"
-                style={{ fontSize: '13px', fontWeight: 700, color: '#3e9891', textDecoration: 'none' }}
               >
                 View full list
-              </a>
+              </s-link>
             </s-stack>
             <s-divider />
           </>

@@ -176,6 +176,13 @@ export default function Index() {
           </s-link>
           .
         </s-paragraph>
+        <s-paragraph>
+          Need an attendee list or sign-in sheet? Use the{" "}
+          <s-link href="/app/export-attendees">Export page</s-link>
+          {" "}to download a CSV, or the{" "}
+          <s-link href="/app/manage-attendees">full Manage Attendees page</s-link>
+          {" "}to see, add, move or remove attendees for any event.
+        </s-paragraph>
       </s-section>
       <s-section heading="Get started with products">
         <s-paragraph>
