@@ -91,12 +91,10 @@ const ADJUST_INVENTORY_MUTATION = `
   }
 `;
 
-// A published app has one real, fixed web address — this is Quilter's
-// Cupboard's. It has to be the full https:// URL (not a relative path)
-// because the panel runs in its own iframe with a different origin than
-// the app itself; a relative link would try to navigate inside that
-// iframe instead of to the real site.
-const APP_BASE_URL = 'https://event-attendees-modern-quilting-production.up.railway.app';
+// The app's page inside Shopify admin (not the raw Railway address). Opening
+// the app through admin lets Shopify handle the login, so the full list page
+// loads with the right permissions. This is Modern Quilting's store + app.
+const APP_ADMIN_URL = 'https://admin.shopify.com/store/modern-quilting/apps/event-attendees-modern';
 
 function shortDateLabel(title) {
   if (!title.includes('|')) return title;
@@ -566,7 +564,19 @@ function Attendees() {
     ? Object.values(eventDates).map((d) => d.title)
     : state.groups.map((g) => g.date);
 
-  const { upcoming, older } = splitUpcomingOlder(state.groups);
+  // Dates that exist on the product but have nobody registered yet. They are
+  // built from the product's own dates (not saved attendees), so a new date
+  // still shows up with an "+ Add attendee" button. Only upcoming dates are
+  // listed, soonest first, capped so a 24-date series doesn't flood the panel.
+  const MAX_EMPTY_DATES = 10;
+  const knownDates = new Set(state.groups.map((g) => g.date.trim().toLowerCase()));
+  const emptyCandidates = Object.values(eventDates)
+    .filter((d) => d.title && !knownDates.has(d.title.trim().toLowerCase()) && labelDateRange(d.title))
+    .map((d) => ({ date: d.title, count: 0, people: [] }));
+  const emptyUpcomingAll = splitUpcomingOlder(emptyCandidates).upcoming;
+  const emptyShown = emptyUpcomingAll.slice(0, MAX_EMPTY_DATES);
+  const emptyHidden = emptyUpcomingAll.length - emptyShown.length;
+  const { upcoming, older } = splitUpcomingOlder([...state.groups, ...emptyShown]);
 
   function renderGroup(g, showDivider) {
       const capacityInfo = eventDates[g.date.toLowerCase()];
@@ -661,14 +671,14 @@ function Attendees() {
   return (
     <s-admin-block heading="Event Attendees">
       <s-stack direction="block" gap="base">
-        {state.groups.length ? (
+        {state.groups.length || upcoming.length ? (
           <>
             <s-stack direction="inline" gap="base" inlineAlignment="space-between">
               <s-text tone="subdued">
                 {upcoming.length} upcoming {upcoming.length === 1 ? 'date' : 'dates'}{older.length ? ` · ${older.length} older` : ''} · {totalAttendees} total {totalAttendees === 1 ? 'attendee' : 'attendees'}
               </s-text>
               <s-link
-                href={`${APP_BASE_URL}/app/manage-attendees?productId=${encodeURIComponent(productId)}&title=${encodeURIComponent(data?.selected?.[0]?.title || '')}`}
+                href={`${APP_ADMIN_URL}/app/manage-attendees?productId=${encodeURIComponent(productId)}`}
                 target="_blank"
               >
                 View full list
@@ -682,8 +692,14 @@ function Attendees() {
 
         {upcoming.map((g, gi) => renderGroup(g, gi < upcoming.length - 1))}
 
+        {emptyHidden > 0 ? (
+          <s-text tone="subdued">
+            +{emptyHidden} more upcoming {emptyHidden === 1 ? 'date' : 'dates'} with no attendees yet
+          </s-text>
+        ) : null}
+
         {state.groups.length && !upcoming.length ? (
-          <s-text tone="subdued">No upcoming dates with attendees.</s-text>
+          <s-text tone="subdued">No upcoming dates.</s-text>
         ) : null}
 
         {older.length ? (
@@ -701,7 +717,7 @@ function Attendees() {
           </s-stack>
         ) : null}
 
-        {!state.groups.length ? (
+        {!state.groups.length && !upcoming.length ? (
           addingForDate === '__new__' ? (
             <NewDateAddForm
               productId={productId}

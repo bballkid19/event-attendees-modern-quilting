@@ -12,7 +12,7 @@
 
 import { useEffect, useState } from "react";
 import type { ActionFunctionArgs, LoaderFunctionArgs } from "react-router";
-import { useFetcher, useSearchParams } from "react-router";
+import { useFetcher, useLoaderData, useSearchParams } from "react-router";
 import { authenticate } from "../shopify.server";
 
 type EventProduct = { id: string; title: string };
@@ -142,8 +142,26 @@ async function loadAttendees(admin: any, productId: string): Promise<DateGroup[]
 }
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
-  await authenticate.admin(request);
-  return null;
+  const { admin } = await authenticate.admin(request);
+  // The panel's "View full list" link only needs to pass productId; look the
+  // event name up here so the page can open straight to that event.
+  const productId = new URL(request.url).searchParams.get("productId");
+  let initialProduct: { id: string; title: string } | null = null;
+  if (productId) {
+    try {
+      const res = await admin.graphql(
+        `#graphql
+        query($id: ID!) { product(id: $id) { id title } }`,
+        { variables: { id: productId } },
+      );
+      const body = await res.json();
+      const p = body?.data?.product;
+      if (p) initialProduct = { id: p.id, title: p.title };
+    } catch (e) {
+      initialProduct = null;
+    }
+  }
+  return { initialProduct };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {
@@ -281,9 +299,11 @@ export default function ManageAttendees() {
   const loadFetcher = useFetcher<typeof action>();
   const actionFetcher = useFetcher<typeof action>();
   const [searchParams] = useSearchParams();
+  const { initialProduct } = useLoaderData<typeof loader>();
 
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedProduct, setSelectedProduct] = useState<EventProduct | null>(() => {
+    if (initialProduct) return initialProduct;
     const productId = searchParams.get("productId");
     const title = searchParams.get("title");
     return productId && title ? { id: productId, title } : null;
